@@ -128,6 +128,8 @@ export default function App() {
   const [borrowVal, setBorrowVal] = useState("");
   const [repayVal, setRepayVal] = useState("");
 
+  const availableBorrowCapacity = Math.max(0, parseFloat(borrowCapacityUSD) - parseFloat(totalBorrowedUSD));
+
   const addConsoleLog = (type, text) => {
     setConsoleLogs(prev => [...prev, { type, text, timestamp: new Date().toLocaleTimeString() }]);
   };
@@ -447,6 +449,11 @@ export default function App() {
   const handleBorrow = () => {
     const amount = parseFloat(borrowVal);
     if (isNaN(amount) || amount <= 0) return;
+
+    if (amount > availableBorrowCapacity) {
+      addConsoleLog('error', `Cannot borrow ${amount} USDC: exceeds available capacity of ${availableBorrowCapacity.toFixed(2)} USDC.`);
+      return;
+    }
 
     const poolContract = new ethers.Contract(contractAddresses.lendingPool, lendingPoolABI, signer);
     const parsedAmount = ethers.parseEther(borrowVal);
@@ -994,8 +1001,8 @@ export default function App() {
                 </div>
                 <div className="metric-card">
                   <div className="metric-label">Available Borrow Capacity</div>
-                  <div className="metric-value">${parseFloat(borrowCapacityUSD).toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
-                  <div className="metric-subvalue">Asset-specific LTV limits</div>
+                  <div className="metric-value">${availableBorrowCapacity.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+                  <div className="metric-subvalue">Max limit: ${parseFloat(borrowCapacityUSD).toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
                 </div>
                 <div className="metric-card">
                   <div className="metric-label">Health Factor</div>
@@ -1161,24 +1168,31 @@ export default function App() {
                           <td style={{ fontWeight: 600 }}>{borrowedAmount} USDC</td>
                           <td style={{ color: 'var(--text-primary)', fontWeight: 600 }}>6.12%</td>
                           <td className="asset-action-cell">
-                            <div style={{ display: 'inline-flex', gap: '0.5rem', width: '220px' }}>
-                              <input 
-                                type="number" 
-                                placeholder="0.0" 
-                                className="input-field" 
-                                style={{ height: '34px', padding: '0.4rem 0.6rem', fontSize: '0.9rem' }}
-                                value={borrowVal}
-                                onChange={(e) => setBorrowVal(e.target.value)}
-                                disabled={txLoading || parseFloat(totalCollateralUSD) === 0}
-                              />
-                              <button 
-                                className="btn-submit" 
-                                style={{ height: '34px', padding: '0.4rem 0.8rem', fontSize: '0.85rem', whiteSpace: 'nowrap', width: 'auto' }}
-                                onClick={handleBorrow}
-                                disabled={txLoading || parseFloat(totalCollateralUSD) === 0 || !borrowVal}
-                              >
-                                Borrow
-                              </button>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', width: '220px', alignItems: 'flex-end' }}>
+                              <div style={{ display: 'flex', gap: '0.5rem', width: '100%' }}>
+                                <input 
+                                  type="number" 
+                                  placeholder="0.0" 
+                                  className="input-field" 
+                                  style={{ height: '34px', padding: '0.4rem 0.6rem', fontSize: '0.9rem', width: '100%' }}
+                                  value={borrowVal}
+                                  onChange={(e) => setBorrowVal(e.target.value)}
+                                  disabled={txLoading || parseFloat(totalCollateralUSD) === 0}
+                                />
+                                <button 
+                                  className="btn-submit" 
+                                  style={{ height: '34px', padding: '0.4rem 0.8rem', fontSize: '0.85rem', whiteSpace: 'nowrap', width: 'auto' }}
+                                  onClick={handleBorrow}
+                                  disabled={txLoading || parseFloat(totalCollateralUSD) === 0 || !borrowVal}
+                                >
+                                  Borrow
+                                </button>
+                              </div>
+                              {availableBorrowCapacity > 0 && (
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                  Max: <span className="input-max-btn" onClick={() => setBorrowVal(availableBorrowCapacity.toFixed(2))}>{availableBorrowCapacity.toFixed(2)} USDC</span>
+                                </span>
+                              )}
                             </div>
                           </td>
                         </tr>
