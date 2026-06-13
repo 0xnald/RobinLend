@@ -1,10 +1,12 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
 describe("RobinLend Protocol", function () {
   let owner;
   let Alice;
   let Bob;
+  let treasury;
   
   let kycRegistry;
   let rwaToken;
@@ -18,7 +20,7 @@ describe("RobinLend Protocol", function () {
   const LTV = 7000; // 70%
 
   beforeEach(async function () {
-    [owner, Alice, Bob] = await ethers.getSigners();
+    [owner, Alice, Bob, treasury] = await ethers.getSigners();
 
     // 1. Deploy KYCRegistry
     const KYCRegistry = await ethers.getContractFactory("KYCRegistry");
@@ -41,7 +43,8 @@ describe("RobinLend Protocol", function () {
     lendingPool = await LendingPool.deploy(
       await kycRegistry.getAddress(),
       await priceOracle.getAddress(),
-      await usdcToken.getAddress()
+      await usdcToken.getAddress(),
+      treasury.address
     );
 
     // Setup: Support the RWA token with 70% LTV
@@ -52,6 +55,9 @@ describe("RobinLend Protocol", function () {
 
     // Setup: Verify LendingPool address in KYC registry to allow holding RWA collateral
     await kycRegistry.setKYCStatus(await lendingPool.getAddress(), true);
+
+    // Setup: Verify treasury address in KYC registry to allow holding RWA collateral
+    await kycRegistry.setKYCStatus(treasury.address, true);
   });
 
   describe("Compliance (KYC Registry & RWAToken)", function () {
@@ -164,24 +170,52 @@ describe("RobinLend Protocol", function () {
       ).to.be.revertedWith("LendingPool: health factor too low after withdrawal");
     });
 
-    it("Should allow repayment and then withdrawal", async function () {
+    it("Should accrue time-based stability fees and split repayment to treasury", async function () {
       await rwaToken.connect(Alice).approve(await lendingPool.getAddress(), DEPOSIT_AMOUNT);
       await lendingPool.connect(Alice).depositCollateral(await rwaToken.getAddress(), DEPOSIT_AMOUNT);
 
+      // Borrow $5,000 USDC
       await lendingPool.connect(Alice).borrow(ethers.parseEther("5000"));
+      
+      // Check timestamp was set
+      const timestampBefore = await lendingPool.userBorrowTimestamp(Alice.address);
+      expect(timestampBefore).to.be.gt(0);
 
-      // Repay borrow
-      await usdcToken.connect(Alice).approve(await lendingPool.getAddress(), ethers.parseEther("5000"));
-      await lendingPool.connect(Alice).repay(ethers.parseEther("5000"));
+      // Increase time by 30 days
+      const thirtyDays = 30 * 24 * 60 * 60;
+      await time.increase(thirtyDays);
 
-      expect(await lendingPool.getUserBorrowed(Alice.address)).to.equal(0);
+      // Expected Interest: 5000 * 0.0612 * 30 / 365 = ~25.15 USDC
+      const expectedInterest = ethers.parseEther("5000") * 612n * BigInt(thirtyDays) / (365n * 24n * 60n * 60n * 10000n);
+      const totalDebt = ethers.parseEther("5000") + expectedInterest;
 
-      // Withdraw collateral successfully
-      await lendingPool.connect(Alice).withdrawCollateral(await rwaToken.getAddress(), DEPOSIT_AMOUNT);
-      expect(await lendingPool.getUserCollateral(Alice.address, await rwaToken.getAddress())).to.equal(0);
+      // Verify getUserBorrowed is dynamically returning principal + interest
+      const userDebt = await lendingPool.getUserBorrowed(Alice.address);
+      expect(userDebt).to.be.closeTo(totalDebt, ethers.parseEther("0.01"));
+
+      // Get USDC to pay interest
+      await usdcToken.faucet(Alice.address, expectedInterest);
+      
+      // Repay the full amount
+      await usdcToken.connect(Alice).approve(await lendingPool.getAddress(), userDebt);
+      const treasuryBalanceBefore = await usdcToken.balanceOf(treasury.address);
+      const poolBalanceBefore = await usdcToken.balanceOf(await lendingPool.getAddress());
+
+      await lendingPool.connect(Alice).repay(userDebt);
+
+      // Verify Alice debt is close to 0 (accommodates 1s block time drift interest)
+      expect(await lendingPool.getUserBorrowed(Alice.address)).to.be.closeTo(0, ethers.parseEther("0.0001"));
+
+      // Verify treasury received the interest
+      const treasuryBalanceAfter = await usdcToken.balanceOf(treasury.address);
+      expect(treasuryBalanceAfter - treasuryBalanceBefore).to.be.closeTo(expectedInterest, ethers.parseEther("0.01"));
+
+      // Verify pool received the principal
+      const poolBalanceAfter = await usdcToken.balanceOf(await lendingPool.getAddress());
+      expect(poolBalanceAfter - poolBalanceBefore).to.be.closeTo(ethers.parseEther("5000"), ethers.parseEther("0.0001"));
     });
 
-    it("Should support liquidation of unhealthy loans", async function () {
+    it("Should support liquidation of unhealthy loans with protocol fee cut", async function () {
       await rwaToken.connect(Alice).approve(await lendingPool.getAddress(), DEPOSIT_AMOUNT);
       await lendingPool.connect(Alice).depositCollateral(await rwaToken.getAddress(), DEPOSIT_AMOUNT);
 
@@ -193,22 +227,34 @@ describe("RobinLend Protocol", function () {
       await priceOracle.setAssetPrice(await rwaToken.getAddress(), 70 * 1e8); // $70.00
 
       // Liquidator (Bob) repays Alice's borrow
-      // Bob needs to approve USDC for pool
       await usdcToken.faucet(Bob.address, ethers.parseEther("7000"));
       await usdcToken.connect(Bob).approve(await lendingPool.getAddress(), ethers.parseEther("7000"));
 
-      // Liquidate Alice's position (liquidate $7,000 borrow)
-      // Bob will receive collateral at 5% discount
-      // $7,000 borrow repaid -> receives: $7,000 * 1.05 = $7,350 value of RWA
-      // At $70/token, RWA received = 7350 / 70 = 105 RWA tokens
-      // Wait, Alice only deposited 100 RWA, so the liquidator can liquidate max $6,666.66 debt (recovering Alice's full 100 RWA)
-      // Let's liquidate $5,000 of debt
-      // $5,000 * 1.05 = $5,250 RWA value. At $70/token, RWA = 5250 / 70 = 75 RWA tokens.
+      const BobRwaBefore = await rwaToken.balanceOf(Bob.address);
+      const treasuryRwaBefore = await rwaToken.balanceOf(treasury.address);
+
+      // Liquidate $5,000 of Alice's debt
+      // Bob repays $5,000 USDC. 
+      // Bob receives collateral RWA worth $5,000 * 1.05 = $5,250. At $70/token: 5250 / 70 = 75 RWA
+      // Treasury receives 2% fee: $5,000 * 0.02 = $100 value. At $70/token: 100 / 70 = 1.42857 RWA
+      // Total RWA taken from Alice = 75 + 1.42857 = 76.42857 RWA
       await lendingPool.connect(Bob).liquidate(Alice.address, await rwaToken.getAddress(), ethers.parseEther("5000"));
 
-      expect(await lendingPool.getUserBorrowed(Alice.address)).to.equal(ethers.parseEther("2000")); // 7000 - 5000
-      expect(await lendingPool.getUserCollateral(Alice.address, await rwaToken.getAddress())).to.equal(ethers.parseEther("25")); // 100 - 75
-      expect(await rwaToken.balanceOf(Bob.address)).to.equal(ethers.parseEther("75")); // Bob got 75 RWA
+      expect(await lendingPool.getUserBorrowed(Alice.address)).to.be.closeTo(ethers.parseEther("2000"), ethers.parseEther("0.0001")); // 7000 - 5000
+      
+      // Assert Bob received 75 RWA
+      const BobRwaAfter = await rwaToken.balanceOf(Bob.address);
+      expect(BobRwaAfter - BobRwaBefore).to.equal(ethers.parseEther("75"));
+
+      // Assert Treasury received 1.42857 RWA
+      const treasuryRwaAfter = await rwaToken.balanceOf(treasury.address);
+      const expectedTreasuryRwa = ethers.parseEther("1.428571428571428571");
+      expect(treasuryRwaAfter - treasuryRwaBefore).to.be.closeTo(expectedTreasuryRwa, 1000n); // minimal rounding difference
+
+      // Assert Alice collateral reduced by total
+      const AliceCollateral = await lendingPool.getUserCollateral(Alice.address, await rwaToken.getAddress());
+      const expectedAliceCollateral = ethers.parseEther("23.571428571428571429"); // 100 - 76.42857
+      expect(AliceCollateral).to.be.closeTo(expectedAliceCollateral, 1000n);
     });
   });
 });

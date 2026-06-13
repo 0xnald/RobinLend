@@ -582,10 +582,8 @@ export default function App() {
               The official stock tokens (TSLA, AMZN, PLTR, NFLX, AMD) are distributed via the official testnet faucet at <code>0x8762f93772c663c6a88ba50900bd5381df2717be</code>. 
             </p>
             <p>
-              Inside the App Dashboard, clicking <strong>Claim 5x Stock Tokens</strong> will execute a contract transaction calling:
+              Inside the App Dashboard, clicking <strong>Claim 5x Stock Tokens</strong> will redirect you to the official Robinhood faucet interface to claim your testnet tokens.
             </p>
-            <pre><code>faucet.sendTokensAndEther(account, amount);</code></pre>
-            <p>This deposits 5 units of each stock token directly into your MetaMask wallet.</p>
             <h2>3. USDC Faucet</h2>
             <p>
               To test the repayment logic, you can claim Mock USDC directly from our deployed <code>USDCToken</code> faucet by clicking the <strong>Claim USDC Faucet</strong> button in the UI.
@@ -651,6 +649,24 @@ export default function App() {
             <p>
               If your Health Factor falls below <strong>1.00</strong>, your collateral becomes subject to liquidation to protect the protocol's solvency.
             </p>
+
+            <h2>On-Chain Stability Fee & Protocol Revenue</h2>
+            <p>
+              RobinLend charges a time-based <strong>6.12% APY Stability Fee (interest)</strong> on all borrows. This fee accrues dynamically per second on-chain. When a borrower calls <code>repay()</code>, the contract automatically splits the payment:
+            </p>
+            <ul>
+              <li>The principal debt is returned to the pool's liquidity.</li>
+              <li>100% of the accrued interest is transferred automatically directly to the <strong>Protocol Treasury Wallet</strong>.</li>
+            </ul>
+
+            <h2>Liquidation Protocol Fees</h2>
+            <p>
+              When a loan is liquidated due to the health factor dropping below 1.00, a total <strong>7% liquidation penalty</strong> is applied to the borrower's position:
+            </p>
+            <ul>
+              <li><strong>5%</strong> of the collateral value is sent to the liquidator as incentive.</li>
+              <li><strong>2%</strong> of the collateral value is automatically routed directly to the <strong>Protocol Treasury Wallet</strong> as protocol revenue.</li>
+            </ul>
           </div>
         );
       case 'addresses':
@@ -714,6 +730,17 @@ export default function App() {
                     </a>
                   </td>
                 </tr>
+                {contractAddresses.treasury && (
+                  <tr>
+                    <td><strong>Protocol Treasury</strong></td>
+                    <td className="docs-address">{contractAddresses.treasury}</td>
+                    <td>
+                      <a href={`${EXPLORER_URL}/address/${contractAddresses.treasury}`} target="_blank" rel="noreferrer">
+                        View <ExternalLink size={12} />
+                      </a>
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -1262,9 +1289,15 @@ export default function App() {
                       <button className="btn-faucet" onClick={handleUSDCFaucet} disabled={txLoading}>
                         Claim USDC Faucet
                       </button>
-                      <button className="btn-faucet primary" onClick={handleStockFaucet} disabled={txLoading}>
-                        Claim 5x Stock Tokens
-                      </button>
+                      <a 
+                        href="https://faucet.testnet.chain.robinhood.com/" 
+                        target="_blank" 
+                        rel="noreferrer" 
+                        className="btn-faucet primary" 
+                        style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}
+                      >
+                        Claim 5x Stock Tokens <ExternalLink size={12} />
+                      </a>
                     </div>
                     
                     <div className="faucet-row">

@@ -45,7 +45,7 @@ async function main() {
   // 4. Deploy LendingPool
   console.log("Deploying LendingPool...");
   const LendingPool = await hre.ethers.getContractFactory("LendingPool");
-  const lendingPool = await LendingPool.deploy(kycRegistryAddress, priceOracleAddress, usdcTokenAddress);
+  const lendingPool = await LendingPool.deploy(kycRegistryAddress, priceOracleAddress, usdcTokenAddress, deployer.address);
   await lendingPool.waitForDeployment();
   const lendingPoolAddress = await lendingPool.getAddress();
   console.log("LendingPool deployed to:", lendingPoolAddress);
@@ -124,6 +124,7 @@ async function main() {
     priceOracle: priceOracleAddress,
     lendingPool: lendingPoolAddress,
     faucet: faucetAddress,
+    treasury: deployer.address,
     tokens: rwaTokens
   };
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
