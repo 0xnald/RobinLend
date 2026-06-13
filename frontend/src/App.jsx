@@ -53,6 +53,7 @@ const faucetABI = [
 
 const ROBINHOOD_CHAIN_ID = 46630;
 const EXPLORER_URL = "https://explorer.testnet.chain.robinhood.com";
+const usdcPrice = 1.00;
 
 // Supported stock tokens and styling configuration
 const STOCK_CONFIGS = {
