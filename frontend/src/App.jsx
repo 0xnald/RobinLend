@@ -27,8 +27,7 @@ const kycRegistryABI = [
 const rwaTokenABI = [
   "function balanceOf(address account) view returns (uint256)",
   "function approve(address spender, uint256 value) external returns (bool)",
-  "function allowance(address owner, address spender) view returns (uint256)",
-  "function faucet(uint256 amount) external"
+  "function allowance(address owner, address spender) view returns (uint256)"
 ];
 const usdcTokenABI = [
   "function balanceOf(address account) view returns (uint256)",
@@ -45,9 +44,24 @@ const lendingPoolABI = [
   "function getUserCollateral(address user, address token) view returns (uint256)",
   "function getUserBorrowed(address user) view returns (uint256)"
 ];
+const priceOracleABI = [
+  "function getAssetPrice(address asset) view returns (uint256)"
+];
+const faucetABI = [
+  "function sendTokensAndEther(address recipient, uint256 tokenAmount) external"
+];
 
 const ROBINHOOD_CHAIN_ID = 46630;
 const EXPLORER_URL = "https://explorer.testnet.chain.robinhood.com";
+
+// Supported stock tokens and styling configuration
+const STOCK_CONFIGS = {
+  TSLA: { name: "Tesla Inc.", logoClass: "tsla-logo", color: "#E82127" },
+  AMZN: { name: "Amazon.com Inc.", logoClass: "amzn-logo", color: "#FF9900" },
+  PLTR: { name: "Palantir Technologies", logoClass: "pltr-logo", color: "#111111" },
+  NFLX: { name: "Netflix Inc.", logoClass: "nflx-logo", color: "#E50914" },
+  AMD: { name: "Advanced Micro Devices", logoClass: "amd-logo", color: "#000000" }
+};
 
 export default function App() {
   // --- Web3 Connection State ---
@@ -59,20 +73,19 @@ export default function App() {
 
   // --- Live On-Chain Data State ---
   const [kycStatus, setKycStatus] = useState(false);
-  const [rwaBalance, setRwaBalance] = useState("0.0");
   const [usdcBalance, setUsdcBalance] = useState("0.0");
-  const [collateralDeposited, setCollateralDeposited] = useState("0.0");
   const [borrowedAmount, setBorrowedAmount] = useState("0.0");
-  
+
+  // Dynamic values per stock token
+  const [walletBalances, setWalletBalances] = useState({});
+  const [collateralBalances, setCollateralBalances] = useState({});
+  const [tokenPrices, setTokenPrices] = useState({});
+
   // Account status aggregates from LendingPool
   const [totalCollateralUSD, setTotalCollateralUSD] = useState("0.0");
   const [totalBorrowedUSD, setTotalBorrowedUSD] = useState("0.0");
   const [borrowCapacityUSD, setBorrowCapacityUSD] = useState("0.0");
   const [healthFactor, setHealthFactor] = useState("9999.0");
-
-  // Fixed prices (mocked in contract price oracle)
-  const rwaPrice = 100.00;
-  const usdcPrice = 1.00;
 
   // Transaction state
   const [txLoading, setTxLoading] = useState(false);
@@ -82,9 +95,9 @@ export default function App() {
   ]);
   const [activeStep, setActiveStep] = useState(null); // 'sign' | 'broadcast' | 'confirm'
 
-  // Input states
-  const [depositVal, setDepositVal] = useState("");
-  const [withdrawVal, setWithdrawVal] = useState("");
+  // Input states per stock token
+  const [depositInputs, setDepositInputs] = useState({});
+  const [withdrawInputs, setWithdrawInputs] = useState({});
   const [borrowVal, setBorrowVal] = useState("");
   const [repayVal, setRepayVal] = useState("");
 
@@ -99,26 +112,52 @@ export default function App() {
     try {
       // Create contract instances
       const kycContract = new ethers.Contract(contractAddresses.kycRegistry, kycRegistryABI, currentProvider);
-      const rwaContract = new ethers.Contract(contractAddresses.iUST, rwaTokenABI, currentProvider);
       const usdcContract = new ethers.Contract(contractAddresses.usdc, usdcTokenABI, currentProvider);
       const poolContract = new ethers.Contract(contractAddresses.lendingPool, lendingPoolABI, currentProvider);
+      const oracleContract = new ethers.Contract(contractAddresses.priceOracle, priceOracleABI, currentProvider);
 
       // 1. Fetch KYC Verification status
       const kycVerified = await kycContract.isVerified(currentAccount);
       setKycStatus(kycVerified);
 
-      // 2. Fetch Wallet Balances
-      const rwaBal = await rwaContract.balanceOf(currentAccount);
+      // 2. Fetch USDC Wallet Balance & borrowed amount
       const usdcBal = await usdcContract.balanceOf(currentAccount);
-      setRwaBalance(parseFloat(ethers.formatEther(rwaBal)).toFixed(2));
       setUsdcBalance(parseFloat(ethers.formatEther(usdcBal)).toFixed(2));
-
-      // 3. Fetch User lending position values
-      const collateral = await poolContract.getUserCollateral(currentAccount, contractAddresses.iUST);
-      setCollateralDeposited(parseFloat(ethers.formatEther(collateral)).toFixed(2));
 
       const borrowed = await poolContract.getUserBorrowed(currentAccount);
       setBorrowedAmount(parseFloat(ethers.formatEther(borrowed)).toFixed(2));
+
+      // 3. Fetch Stock Token Metrics Dynamically
+      const tempWalletBalances = {};
+      const tempCollateralBalances = {};
+      const tempTokenPrices = {};
+
+      const symbols = Object.keys(contractAddresses.tokens);
+      for (const symbol of symbols) {
+        const tokenAddress = contractAddresses.tokens[symbol];
+        const tokenContract = new ethers.Contract(tokenAddress, rwaTokenABI, currentProvider);
+
+        // Balance
+        const bal = await tokenContract.balanceOf(currentAccount);
+        tempWalletBalances[symbol] = parseFloat(ethers.formatEther(bal)).toFixed(2);
+
+        // Collateral Deposited
+        const col = await poolContract.getUserCollateral(currentAccount, tokenAddress);
+        tempCollateralBalances[symbol] = parseFloat(ethers.formatEther(col)).toFixed(2);
+
+        // Price from Oracle
+        try {
+          const price = await oracleContract.getAssetPrice(tokenAddress);
+          tempTokenPrices[symbol] = parseFloat(ethers.formatUnits(price, 8)).toFixed(2);
+        } catch (e) {
+          console.error(`Failed to load price for ${symbol}:`, e);
+          tempTokenPrices[symbol] = "0.00";
+        }
+      }
+
+      setWalletBalances(tempWalletBalances);
+      setCollateralBalances(tempCollateralBalances);
+      setTokenPrices(tempTokenPrices);
 
       // 4. Fetch overall account data metrics from LendingPool
       const accountData = await poolContract.getAccountData(currentAccount);
@@ -229,7 +268,6 @@ export default function App() {
       window.ethereum.on('accountsChanged', handleAccountsChanged);
       window.ethereum.on('chainChanged', handleChainChanged);
 
-      // Auto-connect if already authorized
       window.ethereum.request({ method: 'eth_accounts' }).then(accounts => {
         if (accounts.length > 0) {
           connectWallet();
@@ -247,30 +285,26 @@ export default function App() {
   const runTransaction = async (actionLabel, transactionFn) => {
     if (!signer) return;
     setTxLoading(true);
-    setConsoleLogs([]); // Clear logs for clean readability
+    setConsoleLogs([]); 
     
     try {
-      // Step 1: User Request / Sign MetaMask
       setActiveStep('sign');
       addConsoleLog('info', `[Web3] Requesting transaction signature for: ${actionLabel}`);
       await new Promise(r => setTimeout(r, 400));
       
       const tx = await transactionFn();
       
-      // Step 2: Transaction Broadcasted
       setActiveStep('broadcast');
-      addConsoleLog('success', `[Web3] Transaction successfully signed and broadcasted!`);
+      addConsoleLog('success', `[Web3] Transaction signed and broadcasted!`);
       addConsoleLog('hash', `Tx Hash: ${tx.hash}`);
-      addConsoleLog('info', `Waiting for L2 block mining confirmation...`);
+      addConsoleLog('info', `Waiting for block mining confirmation...`);
 
-      // Step 3: Transaction Mined
       setActiveStep('confirm');
       const receipt = await tx.wait();
       
       addConsoleLog('success', `[Robinhood L2] Block confirmed! Transaction successfully mined.`);
       addConsoleLog('hash', `Block Number: #${receipt.blockNumber} | Gas Used: ${receipt.gasUsed.toString()}`);
       
-      // Update UI values
       await fetchOnChainData(account, signer, provider);
       setActiveStep(null);
     } catch (err) {
@@ -281,37 +315,39 @@ export default function App() {
     setTxLoading(false);
   };
 
-  // --- Contract Action Handlers ---
+  // --- Handlers ---
   const handleVerifyKYC = () => {
     const kycContract = new ethers.Contract(contractAddresses.kycRegistry, kycRegistryABI, signer);
     runTransaction("KYC Whitelist Registration", () => kycContract.register());
   };
 
-  const handleDeposit = async () => {
-    const amount = parseFloat(depositVal);
+  const handleDeposit = async (symbol) => {
+    const inputVal = depositInputs[symbol];
+    const amount = parseFloat(inputVal);
     if (isNaN(amount) || amount <= 0) return;
 
-    const rwaContract = new ethers.Contract(contractAddresses.iUST, rwaTokenABI, signer);
+    const tokenAddress = contractAddresses.tokens[symbol];
+    const tokenContract = new ethers.Contract(tokenAddress, rwaTokenABI, signer);
     const poolContract = new ethers.Contract(contractAddresses.lendingPool, lendingPoolABI, signer);
-    const parsedAmount = ethers.parseEther(depositVal);
+    const parsedAmount = ethers.parseEther(inputVal);
 
     setTxLoading(true);
     try {
-      // Step 1: Approve if necessary
-      const allowance = await rwaContract.allowance(account, contractAddresses.lendingPool);
+      // Step 1: Approve
+      const allowance = await tokenContract.allowance(account, contractAddresses.lendingPool);
       if (allowance < parsedAmount) {
-        addConsoleLog('info', `[Approval] Approving LendingPool to transfer ${depositVal} iUST...`);
-        const approveTx = await rwaContract.approve(contractAddresses.lendingPool, parsedAmount);
+        addConsoleLog('info', `[Approval] Approving LendingPool to transfer ${inputVal} ${symbol}...`);
+        const approveTx = await tokenContract.approve(contractAddresses.lendingPool, parsedAmount);
         addConsoleLog('info', `Waiting for approval confirmation...`);
         await approveTx.wait();
         addConsoleLog('success', `Approval confirmed.`);
       }
 
       // Step 2: Deposit
-      await runTransaction("Deposit Collateral", () => 
-        poolContract.depositCollateral(contractAddresses.iUST, parsedAmount)
+      await runTransaction(`Deposit ${symbol} Collateral`, () => 
+        poolContract.depositCollateral(tokenAddress, parsedAmount)
       );
-      setDepositVal("");
+      setDepositInputs(prev => ({ ...prev, [symbol]: "" }));
     } catch (err) {
       console.error(err);
       addConsoleLog('danger', `Deposit failed: ${err.reason || err.message}`);
@@ -319,17 +355,19 @@ export default function App() {
     }
   };
 
-  const handleWithdraw = () => {
-    const amount = parseFloat(withdrawVal);
+  const handleWithdraw = (symbol) => {
+    const inputVal = withdrawInputs[symbol];
+    const amount = parseFloat(inputVal);
     if (isNaN(amount) || amount <= 0) return;
 
+    const tokenAddress = contractAddresses.tokens[symbol];
     const poolContract = new ethers.Contract(contractAddresses.lendingPool, lendingPoolABI, signer);
-    const parsedAmount = ethers.parseEther(withdrawVal);
+    const parsedAmount = ethers.parseEther(inputVal);
 
-    runTransaction("Withdraw Collateral", () => 
-      poolContract.withdrawCollateral(contractAddresses.iUST, parsedAmount)
+    runTransaction(`Withdraw ${symbol} Collateral`, () => 
+      poolContract.withdrawCollateral(tokenAddress, parsedAmount)
     );
-    setWithdrawVal("");
+    setWithdrawInputs(prev => ({ ...prev, [symbol]: "" }));
   };
 
   const handleBorrow = () => {
@@ -384,14 +422,14 @@ export default function App() {
     );
   };
 
-  const handleRWAFaucet = () => {
-    const rwaContract = new ethers.Contract(contractAddresses.iUST, rwaTokenABI, signer);
-    runTransaction("iUST RWA Faucet Claim", () => 
-      rwaContract.faucet(ethers.parseEther("50"))
+  // Claim stock tokens from the official Robinhood Chain testnet faucet
+  const handleStockFaucet = () => {
+    const faucetContract = new ethers.Contract(contractAddresses.faucet, faucetABI, signer);
+    runTransaction("Claim Testnet Stock Tokens Faucet", () => 
+      faucetContract.sendTokensAndEther(account, ethers.parseEther("5"))
     );
   };
 
-  // Health factor display helper
   const getHealthClass = (hf) => {
     const val = parseFloat(hf);
     if (val > 1.5) return "health-good";
@@ -401,6 +439,7 @@ export default function App() {
 
   const isWrongNetwork = chainId !== ROBINHOOD_CHAIN_ID;
   const isReady = account && !isWrongNetwork;
+  const tokenSymbols = Object.keys(contractAddresses.tokens);
 
   return (
     <div className="app-container">
@@ -485,7 +524,7 @@ export default function App() {
             <div className="metric-card">
               <div className="metric-label">Net Collateral Value</div>
               <div className="metric-value">${parseFloat(totalCollateralUSD).toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
-              <div className="metric-subvalue">{collateralDeposited} iUST deposited</div>
+              <div className="metric-subvalue">Stock values in USD</div>
             </div>
             <div className="metric-card">
               <div className="metric-label">Total Debt</div>
@@ -495,7 +534,7 @@ export default function App() {
             <div className="metric-card">
               <div className="metric-label">Available Borrow Capacity</div>
               <div className="metric-value">${parseFloat(borrowCapacityUSD).toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
-              <div className="metric-subvalue">70% LTV borrow limit</div>
+              <div className="metric-subvalue">Asset-specific LTV limits</div>
             </div>
             <div className="metric-card">
               <div className="metric-label">Health Factor</div>
@@ -515,7 +554,7 @@ export default function App() {
               <div className="panel">
                 <div className="panel-title">
                   <div>Depositable Real-World Assets (Collateral)</div>
-                  <div className="panel-subtitle">On-chain tokenized securities clearing regulatory standards</div>
+                  <div className="panel-subtitle">Official stock tokens deployed on Robinhood Chain L2</div>
                 </div>
                 
                 <table className="asset-table">
@@ -525,53 +564,95 @@ export default function App() {
                       <th>Price</th>
                       <th>Wallet Balance</th>
                       <th>Deposited</th>
-                      <th>RWA Yield (APY)</th>
+                      <th>LTV</th>
                       <th style={{ textAlign: 'right' }}>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr>
-                      <td>
-                        <div className="asset-info">
-                          <div className="asset-logo ust">UST</div>
-                          <div>
-                            <div className="asset-symbol">iUST</div>
-                            <div className="asset-name">US Treasury Bills</div>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="asset-price">${rwaPrice.toFixed(2)}</td>
-                      <td>{rwaBalance} iUST</td>
-                      <td style={{ fontWeight: 600 }}>{collateralDeposited} iUST</td>
-                      <td className="asset-yield">5.24% <TrendingUp size={12} style={{ display: 'inline', marginLeft: '3px' }} /></td>
-                      <td className="asset-action-cell">
-                        <div style={{ display: 'inline-flex', gap: '0.5rem', width: '220px' }}>
-                          <input 
-                            type="number" 
-                            placeholder="0.0" 
-                            className="input-field" 
-                            style={{ height: '34px', padding: '0.4rem 0.6rem', fontSize: '0.9rem' }}
-                            value={depositVal}
-                            onChange={(e) => setDepositVal(e.target.value)}
-                            disabled={txLoading || !kycStatus}
-                          />
-                          <button 
-                            className="btn-submit" 
-                            style={{ height: '34px', padding: '0.4rem 0.8rem', fontSize: '0.85rem', whiteSpace: 'nowrap', width: 'auto' }}
-                            onClick={handleDeposit}
-                            disabled={txLoading || !kycStatus || !depositVal}
-                          >
-                            Deposit
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
+                    {tokenSymbols.map(symbol => {
+                      const cfg = STOCK_CONFIGS[symbol] || { name: symbol, logoClass: "", color: "#fff" };
+                      const price = tokenPrices[symbol] || "0.00";
+                      const walletBal = walletBalances[symbol] || "0.00";
+                      const depositedBal = collateralBalances[symbol] || "0.00";
+                      const depositVal = depositInputs[symbol] || "";
+                      const withdrawVal = withdrawInputs[symbol] || "";
+                      
+                      // LTV configs
+                      const ltvPercent = symbol === "AMZN" ? "75%" : symbol === "PLTR" ? "65%" : "70%";
+
+                      return (
+                        <tr key={symbol}>
+                          <td>
+                            <div className="asset-info">
+                              <div className="asset-logo" style={{ backgroundColor: cfg.color }}>
+                                {symbol}
+                              </div>
+                              <div>
+                                <div className="asset-symbol">{symbol}</div>
+                                <div className="asset-name">{cfg.name}</div>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="asset-price">${parseFloat(price).toFixed(2)}</td>
+                          <td>{walletBal} {symbol}</td>
+                          <td style={{ fontWeight: 600 }}>{depositedBal} {symbol}</td>
+                          <td style={{ color: 'var(--text-secondary)' }}>{ltvPercent}</td>
+                          <td className="asset-action-cell">
+                            <div style={{ display: 'inline-flex', flexDirection: 'column', gap: '0.4rem', width: '220px' }}>
+                              {/* Deposit Row */}
+                              <div style={{ display: 'flex', gap: '0.4rem' }}>
+                                <input 
+                                  type="number" 
+                                  placeholder="Deposit" 
+                                  className="input-field" 
+                                  style={{ height: '30px', padding: '0.2rem 0.5rem', fontSize: '0.8rem', width: '120px' }}
+                                  value={depositVal}
+                                  onChange={(e) => setDepositInputs(prev => ({ ...prev, [symbol]: e.target.value }))}
+                                  disabled={txLoading || !kycStatus}
+                                />
+                                <button 
+                                  className="btn-submit" 
+                                  style={{ height: '30px', padding: '0.2rem 0.6rem', fontSize: '0.8rem', whiteSpace: 'nowrap', width: 'auto' }}
+                                  onClick={() => handleDeposit(symbol)}
+                                  disabled={txLoading || !kycStatus || !depositVal}
+                                >
+                                  Deposit
+                                </button>
+                              </div>
+
+                              {/* Withdraw Row (only if user has deposited balance) */}
+                              {parseFloat(depositedBal) > 0 && (
+                                <div style={{ display: 'flex', gap: '0.4rem' }}>
+                                  <input 
+                                    type="number" 
+                                    placeholder="Withdraw" 
+                                    className="input-field" 
+                                    style={{ height: '30px', padding: '0.2rem 0.5rem', fontSize: '0.8rem', width: '120px' }}
+                                    value={withdrawVal}
+                                    onChange={(e) => setWithdrawInputs(prev => ({ ...prev, [symbol]: e.target.value }))}
+                                    disabled={txLoading}
+                                  />
+                                  <button 
+                                    className="btn-submit btn-danger" 
+                                    style={{ height: '30px', padding: '0.2rem 0.6rem', fontSize: '0.8rem', whiteSpace: 'nowrap', width: 'auto' }}
+                                    onClick={() => handleWithdraw(symbol)}
+                                    disabled={txLoading || !withdrawVal}
+                                  >
+                                    Withdraw
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
 
-                {/* SVG Performance Line graph */}
+                {/* SVG Performance chart */}
                 <div className="chart-container">
-                  <div style={{ position: 'absolute', top: 5, left: 10, fontSize: '0.75rem', color: 'var(--text-secondary)' }}>iUST Treasury Yield Performance Index (30D)</div>
+                  <div style={{ position: 'absolute', top: 5, left: 10, fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Stock Asset Index Yield Tracker (30D)</div>
                   <svg className="chart-svg" viewBox="0 0 500 100" preserveAspectRatio="none">
                     <defs>
                       <linearGradient id="chart-gradient" x1="0" y1="0" x2="0" y2="1">
@@ -583,36 +664,6 @@ export default function App() {
                     <path d="M 0,80 Q 50,60 100,75 T 200,50 T 300,55 T 400,30 T 500,20" className="chart-glow-path" />
                   </svg>
                 </div>
-
-                {/* Withdraw Panel */}
-                {parseFloat(collateralDeposited) > 0 && (
-                  <div className="action-box" style={{ marginTop: '0.5rem' }}>
-                    <div className="input-container">
-                      <div className="input-label-row">
-                        <span>Withdraw iUST Collateral</span>
-                        <span>Max: <span className="input-max-btn" onClick={() => setWithdrawVal(collateralDeposited)}>{collateralDeposited} iUST</span></span>
-                      </div>
-                      <div className="input-wrapper">
-                        <input 
-                          type="number" 
-                          placeholder="0.0" 
-                          className="input-field" 
-                          value={withdrawVal}
-                          onChange={(e) => setWithdrawVal(e.target.value)}
-                          disabled={txLoading}
-                        />
-                        <span className="input-token-tag">iUST</span>
-                      </div>
-                    </div>
-                    <button 
-                      className="btn-submit btn-danger" 
-                      onClick={handleWithdraw}
-                      disabled={txLoading || !withdrawVal}
-                    >
-                      Withdraw iUST
-                    </button>
-                  </div>
-                )}
               </div>
 
               {/* Borrow Stablecoins Panel */}
@@ -657,13 +708,13 @@ export default function App() {
                             style={{ height: '34px', padding: '0.4rem 0.6rem', fontSize: '0.9rem' }}
                             value={borrowVal}
                             onChange={(e) => setBorrowVal(e.target.value)}
-                            disabled={txLoading || parseFloat(collateralDeposited) === 0}
+                            disabled={txLoading || parseFloat(totalCollateralUSD) === 0}
                           />
                           <button 
                             className="btn-submit" 
                             style={{ height: '34px', padding: '0.4rem 0.8rem', fontSize: '0.85rem', whiteSpace: 'nowrap', width: 'auto' }}
                             onClick={handleBorrow}
-                            disabled={txLoading || parseFloat(collateralDeposited) === 0 || !borrowVal}
+                            disabled={txLoading || parseFloat(totalCollateralUSD) === 0 || !borrowVal}
                           >
                             Borrow
                           </button>
@@ -705,7 +756,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Right Column: Console relayer */}
+            {/* Right Column: Console */}
             <div className="main-column" style={{ gap: '1rem' }}>
               {/* Event Relayer Console Panel */}
               <div className="panel" style={{ display: 'flex', flexGrow: '1', flexDirection: 'column', minHeight: '400px' }}>
@@ -717,7 +768,7 @@ export default function App() {
                   <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>Robinhood L2 Network Logs</span>
                 </div>
 
-                {/* MetaMask Action Flow visualizer */}
+                {/* MetaMask Action Flow */}
                 <div className="userop-visualizer">
                   <div className={`visualizer-node`}>
                     <div className={`node-icon ${txLoading && activeStep === 'sign' ? 'active' : ''}`}>
@@ -771,14 +822,14 @@ export default function App() {
                 <div className="panel-title">
                   <div>Robinhood Testnet Faucets</div>
                 </div>
-                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>Claim on-chain mock tokens to fund your wallet for testing.</p>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>Claim on-chain mock stock tokens to test collateralized positions.</p>
                 
                 <div style={{ display: 'flex', gap: '0.5rem' }}>
                   <button className="btn-faucet" onClick={handleUSDCFaucet} disabled={txLoading}>
                     Claim USDC Faucet
                   </button>
-                  <button className="btn-faucet primary" onClick={handleRWAFaucet} disabled={txLoading || !kycStatus}>
-                    Claim iUST Faucet
+                  <button className="btn-faucet primary" onClick={handleStockFaucet} disabled={txLoading}>
+                    Claim 5x Stock Tokens
                   </button>
                 </div>
                 
