@@ -32,6 +32,14 @@ contract KYCRegistry {
     }
 
     /**
+     * @dev Allows self-service KYC verification for testnet purposes.
+     */
+    function register() external {
+        _verifiedUsers[msg.sender] = true;
+        emit UserVerified(msg.sender);
+    }
+
+    /**
      * @dev Sets the KYC status of a single user.
      */
     function setKYCStatus(address user, bool status) external onlyOwner {

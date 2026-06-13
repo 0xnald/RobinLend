@@ -97,6 +97,20 @@ async function main() {
   console.log(`PriceOracle:  ${priceOracleAddress}`);
   console.log(`LendingPool:  ${lendingPoolAddress}`);
   console.log("=================================================");
+
+  // Write config file to frontend src
+  const fs = require("fs");
+  const path = require("path");
+  const configPath = path.join(__dirname, "../frontend/src/config.json");
+  const config = {
+    kycRegistry: kycRegistryAddress,
+    iUST: rwaTokenAddress,
+    usdc: usdcTokenAddress,
+    priceOracle: priceOracleAddress,
+    lendingPool: lendingPoolAddress
+  };
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  console.log("Configuration written to:", configPath);
 }
 
 main()

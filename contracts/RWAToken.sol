@@ -35,6 +35,14 @@ contract RWAToken is ERC20 {
     }
 
     /**
+     * @dev Public faucet to mint RWA tokens. Gated by onlyKYC modifier to ensure compliance.
+     */
+    function faucet(uint256 amount) external onlyKYC(msg.sender) {
+        require(amount <= 1000 * 10**decimals(), "RWAToken: faucet limit exceeded");
+        _mint(msg.sender, amount);
+    }
+
+    /**
      * @dev Mint new tokens. Only the owner can mint, and only to a KYC verified address.
      */
     function mint(address to, uint256 amount) external onlyOwner onlyKYC(to) {

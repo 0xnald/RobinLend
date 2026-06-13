@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   ShieldCheck, 
   ShieldAlert, 
@@ -17,17 +17,24 @@ import {
   Sparkles
 } from 'lucide-react';
 import { ethers } from 'ethers';
+import contractAddresses from './config.json';
 
-// Mock ABI data for UI interaction in mock-mode
-// and for ethers contract calls in live-mode.
+// ABIs for real contract interactions
 const kycRegistryABI = [
   "function isVerified(address user) view returns (bool)",
-  "function setKYCStatus(address user, bool status) external"
+  "function register() external"
 ];
 const rwaTokenABI = [
   "function balanceOf(address account) view returns (uint256)",
   "function approve(address spender, uint256 value) external returns (bool)",
-  "function allowance(address owner, address spender) view returns (uint256)"
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function faucet(uint256 amount) external"
+];
+const usdcTokenABI = [
+  "function balanceOf(address account) view returns (uint256)",
+  "function approve(address spender, uint256 value) external returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function faucet(address to, uint256 amount) external"
 ];
 const lendingPoolABI = [
   "function getAccountData(address user) view returns (uint256 totalCollateralUSD, uint256 totalBorrowedUSD, uint256 borrowCapacityUSD, uint256 healthFactor)",
@@ -39,57 +46,99 @@ const lendingPoolABI = [
   "function getUserBorrowed(address user) view returns (uint256)"
 ];
 
-// Mock contract addresses (these will be updated upon deployment, or defaults will be used)
-const CONTRACT_ADDRESSES = {
-  kycRegistry: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-  iUST: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
-  usdc: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-  lendingPool: "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
-  priceOracle: "0xDc64a140Aa3E981100a9becA4E685f962f0cf6C9"
-};
+const ROBINHOOD_CHAIN_ID = 46630;
+const EXPLORER_URL = "https://explorer.testnet.chain.robinhood.com";
 
 export default function App() {
-  // --- Web3 State ---
-  const [isWeb3Mode, setIsWeb3Mode] = useState(false); // Toggle between Web3 and Mock mode
+  // --- Web3 Connection State ---
   const [provider, setProvider] = useState(null);
   const [signer, setSigner] = useState(null);
   const [account, setAccount] = useState("");
   const [chainId, setChainId] = useState(null);
   const [web3Loading, setWeb3Loading] = useState(false);
 
-  // --- Account State (Balances & Positions) ---
+  // --- Live On-Chain Data State ---
   const [kycStatus, setKycStatus] = useState(false);
-  const [rwaBalance, setRwaBalance] = useState("150.0"); // 150 iUST
-  const [usdcBalance, setUsdcBalance] = useState("5000.0"); // $5000 USDC
+  const [rwaBalance, setRwaBalance] = useState("0.0");
+  const [usdcBalance, setUsdcBalance] = useState("0.0");
   const [collateralDeposited, setCollateralDeposited] = useState("0.0");
   const [borrowedAmount, setBorrowedAmount] = useState("0.0");
-  const [healthFactor, setHealthFactor] = useState("9999.0"); // Infinite initially
   
-  // Prices
-  const rwaPrice = 100.00; // Fixed mock price $100.00
-  const usdcPrice = 1.00; // Pegged
+  // Account status aggregates from LendingPool
+  const [totalCollateralUSD, setTotalCollateralUSD] = useState("0.0");
+  const [totalBorrowedUSD, setTotalBorrowedUSD] = useState("0.0");
+  const [borrowCapacityUSD, setBorrowCapacityUSD] = useState("0.0");
+  const [healthFactor, setHealthFactor] = useState("9999.0");
 
-  // Inputs
+  // Fixed prices (mocked in contract price oracle)
+  const rwaPrice = 100.00;
+  const usdcPrice = 1.00;
+
+  // Transaction state
+  const [txLoading, setTxLoading] = useState(false);
+  const [consoleLogs, setConsoleLogs] = useState([
+    { type: 'info', text: 'RobinLend Live Monitor initialized.' },
+    { type: 'info', text: 'Please connect MetaMask to Robinhood Chain Testnet to start.' }
+  ]);
+  const [activeStep, setActiveStep] = useState(null); // 'sign' | 'broadcast' | 'confirm'
+
+  // Input states
   const [depositVal, setDepositVal] = useState("");
   const [withdrawVal, setWithdrawVal] = useState("");
   const [borrowVal, setBorrowVal] = useState("");
   const [repayVal, setRepayVal] = useState("");
 
-  // Loading & Transaction Logs
-  const [txLoading, setTxLoading] = useState(false);
-  const [gaslessEnabled, setGaslessEnabled] = useState(true); // Default to sponsored smart account
-  const [consoleLogs, setConsoleLogs] = useState([
-    { type: 'info', text: 'RobinLend Smart Relayer Console initialized.' },
-    { type: 'info', text: 'Ready to sponsor gas via ZeroDev / Pimlico ERC-4337 Paymaster.' }
-  ]);
-  const [activeNode, setActiveNode] = useState(null); // Node for ERC-4337 execution animation
+  const addConsoleLog = (type, text) => {
+    setConsoleLogs(prev => [...prev, { type, text, timestamp: new Date().toLocaleTimeString() }]);
+  };
 
-  // Computed Values
-  const collateralValueUSD = parseFloat(collateralDeposited) * rwaPrice;
-  const borrowCapacityUSD = collateralValueUSD * 0.70; // 70% LTV
-  const remainingBorrowCapacityUSD = Math.max(0, borrowCapacityUSD - parseFloat(borrowedAmount));
+  // --- Fetch On-Chain Data ---
+  const fetchOnChainData = useCallback(async (currentAccount, currentSigner, currentProvider) => {
+    if (!currentAccount || !currentSigner || !currentProvider) return;
+    
+    try {
+      // Create contract instances
+      const kycContract = new ethers.Contract(contractAddresses.kycRegistry, kycRegistryABI, currentProvider);
+      const rwaContract = new ethers.Contract(contractAddresses.iUST, rwaTokenABI, currentProvider);
+      const usdcContract = new ethers.Contract(contractAddresses.usdc, usdcTokenABI, currentProvider);
+      const poolContract = new ethers.Contract(contractAddresses.lendingPool, lendingPoolABI, currentProvider);
 
-  // --- Add/Switch Robinhood Testnet Network ---
+      // 1. Fetch KYC Verification status
+      const kycVerified = await kycContract.isVerified(currentAccount);
+      setKycStatus(kycVerified);
+
+      // 2. Fetch Wallet Balances
+      const rwaBal = await rwaContract.balanceOf(currentAccount);
+      const usdcBal = await usdcContract.balanceOf(currentAccount);
+      setRwaBalance(parseFloat(ethers.formatEther(rwaBal)).toFixed(2));
+      setUsdcBalance(parseFloat(ethers.formatEther(usdcBal)).toFixed(2));
+
+      // 3. Fetch User lending position values
+      const collateral = await poolContract.getUserCollateral(currentAccount, contractAddresses.iUST);
+      setCollateralDeposited(parseFloat(ethers.formatEther(collateral)).toFixed(2));
+
+      const borrowed = await poolContract.getUserBorrowed(currentAccount);
+      setBorrowedAmount(parseFloat(ethers.formatEther(borrowed)).toFixed(2));
+
+      // 4. Fetch overall account data metrics from LendingPool
+      const accountData = await poolContract.getAccountData(currentAccount);
+      setTotalCollateralUSD(parseFloat(ethers.formatEther(accountData.totalCollateralUSD)).toFixed(2));
+      setTotalBorrowedUSD(parseFloat(ethers.formatEther(accountData.totalBorrowedUSD)).toFixed(2));
+      setBorrowCapacityUSD(parseFloat(ethers.formatEther(accountData.borrowCapacityUSD)).toFixed(2));
+
+      const hfValue = accountData.healthFactor;
+      if (hfValue > ethers.parseEther("1000000")) {
+        setHealthFactor("9999.0");
+      } else {
+        setHealthFactor(parseFloat(ethers.formatEther(hfValue)).toFixed(2));
+      }
+    } catch (err) {
+      console.error("Error reading blockchain state:", err);
+      addConsoleLog('danger', `Failed to load on-chain data: ${err.message}`);
+    }
+  }, []);
+
+  // --- Network Switcher ---
   const switchNetwork = async () => {
     if (!window.ethereum) return;
     try {
@@ -107,20 +156,20 @@ export default function App() {
               chainName: 'Robinhood Chain Testnet',
               rpcUrls: ['https://rpc.testnet.chain.robinhood.com'],
               nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-              blockExplorerUrls: ['https://explorer.testnet.chain.robinhood.com']
+              blockExplorerUrls: [EXPLORER_URL]
             }]
           });
         } catch (addError) {
-          console.error("Failed to add network", addError);
+          console.error("Failed to add network:", addError);
         }
       }
     }
   };
 
-  // --- Connect Wallet ---
+  // --- Wallet Connection ---
   const connectWallet = async () => {
     if (!window.ethereum) {
-      alert("Metamask or an EVM wallet is required for Live mode!");
+      alert("An EVM wallet (like MetaMask) is required to interact with RobinLend.");
       return;
     }
     setWeb3Loading(true);
@@ -129,226 +178,229 @@ export default function App() {
       const accounts = await tempProvider.send("eth_requestAccounts", []);
       const tempSigner = await tempProvider.getSigner();
       const network = await tempProvider.getNetwork();
+      const networkChainId = Number(network.chainId);
 
       setProvider(tempProvider);
       setSigner(tempSigner);
       setAccount(accounts[0]);
-      setChainId(Number(network.chainId));
-      setIsWeb3Mode(true);
-      
+      setChainId(networkChainId);
+
       addConsoleLog('success', `Connected Wallet: ${accounts[0].slice(0, 6)}...${accounts[0].slice(-4)}`);
       
-      // If chainId is incorrect, trigger switch
-      if (Number(network.chainId) !== 46630) {
-        addConsoleLog('warning', `Incorrect network. Please switch to Robinhood Chain Testnet (Chain ID 46630).`);
+      if (networkChainId !== ROBINHOOD_CHAIN_ID) {
+        addConsoleLog('warning', `Unsupported chain (ID: ${networkChainId}). Prompting network switch...`);
         await switchNetwork();
+      } else {
+        await fetchOnChainData(accounts[0], tempSigner, tempProvider);
       }
     } catch (err) {
       console.error(err);
-      addConsoleLog('danger', `Wallet connection failed: ${err.message}`);
+      addConsoleLog('danger', `Connection failed: ${err.message}`);
     }
     setWeb3Loading(false);
   };
 
-  const addConsoleLog = (type, text) => {
-    setConsoleLogs(prev => [...prev, { type, text, timestamp: new Date().toLocaleTimeString() }]);
-  };
+  // --- Watch Account & Network Changes ---
+  useEffect(() => {
+    if (window.ethereum) {
+      const handleAccountsChanged = async (accounts) => {
+        if (accounts.length > 0) {
+          setAccount(accounts[0]);
+          addConsoleLog('info', `Switched account: ${accounts[0].slice(0, 6)}...`);
+          const tempProvider = new ethers.BrowserProvider(window.ethereum);
+          const tempSigner = await tempProvider.getSigner();
+          setProvider(tempProvider);
+          setSigner(tempSigner);
+          await fetchOnChainData(accounts[0], tempSigner, tempProvider);
+        } else {
+          setAccount("");
+          setSigner(null);
+          addConsoleLog('warning', 'Wallet disconnected.');
+        }
+      };
 
-  // --- Mock Blockchain Actions (Visual Simulation of AA) ---
-  const simulateAA = async (actionName, calldataStr, executeActionCallback) => {
-    setTxLoading(true);
-    setConsoleLogs([]); // Clear logs for clean visual execution
-    addConsoleLog('info', `[SmartAccount] Initiating sponsored transaction for: ${actionName}`);
-    
-    // Step 1: UserOp Creation
-    setActiveNode('smartaccount');
-    addConsoleLog('info', `[ERC-4337] Building UserOperation...`);
-    addConsoleLog('hash', `Sender: ${account || '0xSmartAccountWalletProxyAddress'}`);
-    addConsoleLog('hash', `CallData: ${calldataStr}`);
-    await new Promise(r => setTimeout(r, 800));
+      const handleChainChanged = (hexChainId) => {
+        const decChainId = Number(hexChainId);
+        setChainId(decChainId);
+        addConsoleLog('info', `Switched network to Chain ID: ${decChainId}`);
+        window.location.reload();
+      };
 
-    // Step 2: Signature
-    addConsoleLog('info', `[Signer] Signing UserOperation hash with EOA key...`);
-    await new Promise(r => setTimeout(r, 600));
+      window.ethereum.on('accountsChanged', handleAccountsChanged);
+      window.ethereum.on('chainChanged', handleChainChanged);
 
-    // Step 3: Bundler
-    setActiveNode('bundler');
-    addConsoleLog('info', `[Pimlico Bundler] Receiving signed UserOperation. Simulating gas validation...`);
-    await new Promise(r => setTimeout(r, 800));
-
-    // Step 4: Paymaster Gas Sponsorship
-    setActiveNode('paymaster');
-    addConsoleLog('success', `[ZeroDev Paymaster] Sponsoring Gas! Sponsoring 0.00012 ETH gas fees.`);
-    addConsoleLog('hash', `Gas Token: ETH | Sponsored Status: APPROVED`);
-    await new Promise(r => setTimeout(r, 800));
-
-    // Step 5: EntryPoint execution on Robinhood Chain L2
-    setActiveNode('entrypoint');
-    addConsoleLog('info', `[EntryPoint] Executing UserOperation bundle on Robinhood L2 (Chain ID 46630)...`);
-    await new Promise(r => setTimeout(r, 800));
-
-    // Step 6: Success!
-    setActiveNode(null);
-    executeActionCallback();
-    setTxLoading(false);
-    
-    const mockTxHash = "0x" + Array.from({length: 64}, () => Math.floor(Math.random()*16).toString(16)).join('');
-    addConsoleLog('success', `[Robinhood L2] Transaction Confirmed in Block #${Math.floor(Math.random()*100000) + 1200000}`);
-    addConsoleLog('hash', `Tx Hash: ${mockTxHash}`);
-  };
-
-  // --- Handlers ---
-  const handleVerifyKYC = () => {
-    if (gaslessEnabled) {
-      simulateAA("KYC verification", "KYCRegistry.setKYCStatus(user, true)", () => {
-        setKycStatus(true);
-        addConsoleLog('success', 'Robinhood Verified Credentials successfully associated with wallet!');
+      // Auto-connect if already authorized
+      window.ethereum.request({ method: 'eth_accounts' }).then(accounts => {
+        if (accounts.length > 0) {
+          connectWallet();
+        }
       });
-    } else {
-      // Direct Web3 Mode or simple EOA mock
-      setKycStatus(true);
-      addConsoleLog('success', 'User KYC verification completed.');
+
+      return () => {
+        window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
+        window.ethereum.removeListener('chainChanged', handleChainChanged);
+      };
     }
+  }, [fetchOnChainData]);
+
+  // --- Run On-Chain Transaction Wrapper ---
+  const runTransaction = async (actionLabel, transactionFn) => {
+    if (!signer) return;
+    setTxLoading(true);
+    setConsoleLogs([]); // Clear logs for clean readability
+    
+    try {
+      // Step 1: User Request / Sign MetaMask
+      setActiveStep('sign');
+      addConsoleLog('info', `[Web3] Requesting transaction signature for: ${actionLabel}`);
+      await new Promise(r => setTimeout(r, 400));
+      
+      const tx = await transactionFn();
+      
+      // Step 2: Transaction Broadcasted
+      setActiveStep('broadcast');
+      addConsoleLog('success', `[Web3] Transaction successfully signed and broadcasted!`);
+      addConsoleLog('hash', `Tx Hash: ${tx.hash}`);
+      addConsoleLog('info', `Waiting for L2 block mining confirmation...`);
+
+      // Step 3: Transaction Mined
+      setActiveStep('confirm');
+      const receipt = await tx.wait();
+      
+      addConsoleLog('success', `[Robinhood L2] Block confirmed! Transaction successfully mined.`);
+      addConsoleLog('hash', `Block Number: #${receipt.blockNumber} | Gas Used: ${receipt.gasUsed.toString()}`);
+      
+      // Update UI values
+      await fetchOnChainData(account, signer, provider);
+      setActiveStep(null);
+    } catch (err) {
+      console.error(err);
+      setActiveStep(null);
+      addConsoleLog('danger', `Transaction reverted: ${err.reason || err.message}`);
+    }
+    setTxLoading(false);
   };
 
-  const handleDeposit = () => {
+  // --- Contract Action Handlers ---
+  const handleVerifyKYC = () => {
+    const kycContract = new ethers.Contract(contractAddresses.kycRegistry, kycRegistryABI, signer);
+    runTransaction("KYC Whitelist Registration", () => kycContract.register());
+  };
+
+  const handleDeposit = async () => {
     const amount = parseFloat(depositVal);
     if (isNaN(amount) || amount <= 0) return;
-    if (amount > parseFloat(rwaBalance)) {
-      alert("Insufficient RWA balance!");
-      return;
-    }
 
-    const performDeposit = () => {
-      setRwaBalance(prev => (parseFloat(prev) - amount).toFixed(1));
-      setCollateralDeposited(prev => (parseFloat(prev) + amount).toFixed(1));
+    const rwaContract = new ethers.Contract(contractAddresses.iUST, rwaTokenABI, signer);
+    const poolContract = new ethers.Contract(contractAddresses.lendingPool, lendingPoolABI, signer);
+    const parsedAmount = ethers.parseEther(depositVal);
+
+    setTxLoading(true);
+    try {
+      // Step 1: Approve if necessary
+      const allowance = await rwaContract.allowance(account, contractAddresses.lendingPool);
+      if (allowance < parsedAmount) {
+        addConsoleLog('info', `[Approval] Approving LendingPool to transfer ${depositVal} iUST...`);
+        const approveTx = await rwaContract.approve(contractAddresses.lendingPool, parsedAmount);
+        addConsoleLog('info', `Waiting for approval confirmation...`);
+        await approveTx.wait();
+        addConsoleLog('success', `Approval confirmed.`);
+      }
+
+      // Step 2: Deposit
+      await runTransaction("Deposit Collateral", () => 
+        poolContract.depositCollateral(contractAddresses.iUST, parsedAmount)
+      );
       setDepositVal("");
-      addConsoleLog('success', `Deposited ${amount} iUST Collateral into Lending Pool.`);
-    };
-
-    if (gaslessEnabled) {
-      simulateAA("Deposit Collateral", `LendingPool.depositCollateral(iUST, ${amount})`, performDeposit);
-    } else {
-      performDeposit();
+    } catch (err) {
+      console.error(err);
+      addConsoleLog('danger', `Deposit failed: ${err.reason || err.message}`);
+      setTxLoading(false);
     }
   };
 
   const handleWithdraw = () => {
     const amount = parseFloat(withdrawVal);
     if (isNaN(amount) || amount <= 0) return;
-    if (amount > parseFloat(collateralDeposited)) {
-      alert("Insufficient deposited collateral!");
-      return;
-    }
 
-    // Verify health factor doesn't drop below 1
-    const newCollateral = parseFloat(collateralDeposited) - amount;
-    const newCollateralValueUSD = newCollateral * rwaPrice;
-    const newCapacity = newCollateralValueUSD * 0.70;
-    const currentBorrow = parseFloat(borrowedAmount);
-    
-    if (currentBorrow > 0 && currentBorrow > newCapacity) {
-      alert("Cannot withdraw! Action would drop Health Factor below 1.0.");
-      return;
-    }
+    const poolContract = new ethers.Contract(contractAddresses.lendingPool, lendingPoolABI, signer);
+    const parsedAmount = ethers.parseEther(withdrawVal);
 
-    const performWithdraw = () => {
-      setCollateralDeposited(prev => (parseFloat(prev) - amount).toFixed(1));
-      setRwaBalance(prev => (parseFloat(prev) + amount).toFixed(1));
-      setWithdrawVal("");
-      addConsoleLog('success', `Withdrew ${amount} iUST Collateral back to wallet.`);
-    };
-
-    if (gaslessEnabled) {
-      simulateAA("Withdraw Collateral", `LendingPool.withdrawCollateral(iUST, ${amount})`, performWithdraw);
-    } else {
-      performWithdraw();
-    }
+    runTransaction("Withdraw Collateral", () => 
+      poolContract.withdrawCollateral(contractAddresses.iUST, parsedAmount)
+    );
+    setWithdrawVal("");
   };
 
   const handleBorrow = () => {
     const amount = parseFloat(borrowVal);
     if (isNaN(amount) || amount <= 0) return;
-    if (amount > remainingBorrowCapacityUSD) {
-      alert("Borrow amount exceeds remaining borrow capacity!");
-      return;
-    }
 
-    const performBorrow = () => {
-      setBorrowedAmount(prev => (parseFloat(prev) + amount).toFixed(1));
-      setUsdcBalance(prev => (parseFloat(prev) + amount).toFixed(1));
-      setBorrowVal("");
-      addConsoleLog('success', `Borrowed $${amount} USDC from Lending Pool.`);
-    };
+    const poolContract = new ethers.Contract(contractAddresses.lendingPool, lendingPoolABI, signer);
+    const parsedAmount = ethers.parseEther(borrowVal);
 
-    if (gaslessEnabled) {
-      simulateAA("Borrow USDC", `LendingPool.borrow(${amount})`, performBorrow);
-    } else {
-      performBorrow();
-    }
+    runTransaction("Borrow USDC", () => 
+      poolContract.borrow(parsedAmount)
+    );
+    setBorrowVal("");
   };
 
-  const handleRepay = () => {
+  const handleRepay = async () => {
     const amount = parseFloat(repayVal);
     if (isNaN(amount) || amount <= 0) return;
-    if (amount > parseFloat(usdcBalance)) {
-      alert("Insufficient USDC balance to repay!");
-      return;
-    }
-    if (amount > parseFloat(borrowedAmount)) {
-      alert("Repayment amount exceeds total borrowed amount!");
-      return;
-    }
 
-    const performRepay = () => {
-      setBorrowedAmount(prev => (parseFloat(prev) - amount).toFixed(1));
-      setUsdcBalance(prev => (parseFloat(prev) - amount).toFixed(1));
+    const usdcContract = new ethers.Contract(contractAddresses.usdc, usdcTokenABI, signer);
+    const poolContract = new ethers.Contract(contractAddresses.lendingPool, lendingPoolABI, signer);
+    const parsedAmount = ethers.parseEther(repayVal);
+
+    setTxLoading(true);
+    try {
+      // Step 1: Approve USDC
+      const allowance = await usdcContract.allowance(account, contractAddresses.lendingPool);
+      if (allowance < parsedAmount) {
+        addConsoleLog('info', `[Approval] Approving LendingPool to transfer ${repayVal} USDC...`);
+        const approveTx = await usdcContract.approve(contractAddresses.lendingPool, parsedAmount);
+        addConsoleLog('info', `Waiting for approval confirmation...`);
+        await approveTx.wait();
+        addConsoleLog('success', `Approval confirmed.`);
+      }
+
+      // Step 2: Repay
+      await runTransaction("Repay USDC Loan", () => 
+        poolContract.repay(parsedAmount)
+      );
       setRepayVal("");
-      addConsoleLog('success', `Repaid $${amount} USDC of borrowed debt.`);
-    };
-
-    if (gaslessEnabled) {
-      simulateAA("Repay USDC", `LendingPool.repay(${amount})`, performRepay);
-    } else {
-      performRepay();
+    } catch (err) {
+      console.error(err);
+      addConsoleLog('danger', `Repayment failed: ${err.reason || err.message}`);
+      setTxLoading(false);
     }
   };
 
   const handleUSDCFaucet = () => {
-    setUsdcBalance(prev => (parseFloat(prev) + 1000.0).toFixed(1));
-    addConsoleLog('success', 'Claimed 1,000 mock USDC from testnet faucet.');
+    const usdcContract = new ethers.Contract(contractAddresses.usdc, usdcTokenABI, signer);
+    runTransaction("USDC Faucet Claim", () => 
+      usdcContract.faucet(account, ethers.parseEther("1000"))
+    );
   };
 
   const handleRWAFaucet = () => {
-    if (!kycStatus) {
-      alert("You must clear KYC status before minting compliant RWA tokens!");
-      return;
-    }
-    setRwaBalance(prev => (parseFloat(prev) + 50.0).toFixed(1));
-    addConsoleLog('success', 'Minted 50 iUST (compliant US Treasuries) to wallet.');
+    const rwaContract = new ethers.Contract(contractAddresses.iUST, rwaTokenABI, signer);
+    runTransaction("iUST RWA Faucet Claim", () => 
+      rwaContract.faucet(ethers.parseEther("50"))
+    );
   };
 
-  // Re-calculate Health Factor
-  useEffect(() => {
-    const collateral = parseFloat(collateralDeposited);
-    const borrow = parseFloat(borrowedAmount);
-    if (borrow === 0) {
-      setHealthFactor("9999.0");
-    } else {
-      const collateralValue = collateral * rwaPrice;
-      const capacity = collateralValue * 0.70;
-      const health = (capacity / borrow).toFixed(2);
-      setHealthFactor(health);
-    }
-  }, [collateralDeposited, borrowedAmount]);
-
-  // CSS Health Factor Color classes
+  // Health factor display helper
   const getHealthClass = (hf) => {
     const val = parseFloat(hf);
     if (val > 1.5) return "health-good";
     if (val >= 1.0) return "health-warning";
     return "health-danger";
   };
+
+  const isWrongNetwork = chainId !== ROBINHOOD_CHAIN_ID;
+  const isReady = account && !isWrongNetwork;
 
   return (
     <div className="app-container">
@@ -357,30 +409,20 @@ export default function App() {
         <div className="brand">
           <div className="brand-logo">R</div>
           <div className="brand-text">Robin<span>Lend</span></div>
-          <span className="brand-subtitle" style={{ marginLeft: '10px', verticalAlign: 'middle', background: 'rgba(255,255,255,0.05)', padding: '2px 8px', borderRadius: '4px', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>RWA-backed Compliance DeFi</span>
+          <span className="brand-subtitle" style={{ marginLeft: '10px', verticalAlign: 'middle', background: 'rgba(255,255,255,0.05)', padding: '2px 8px', borderRadius: '4px', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>RWA Compliance Vault</span>
         </div>
         
         <div className="header-actions">
-          <div className={`network-badge ${isWeb3Mode ? 'web3' : 'robinhood'}`}>
-            <div className="network-dot"></div>
-            {isWeb3Mode ? 'Robinhood L2 Live' : 'Robinhood L2 Testnet (Simulated)'}
-          </div>
-
-          <div className="toggle-container">
-            <span style={{ fontSize: '0.75rem' }}>ERC-4337 Sponsored Gas</span>
-            <label className="toggle-switch">
-              <input 
-                type="checkbox" 
-                checked={gaslessEnabled} 
-                onChange={(e) => setGaslessEnabled(e.target.checked)} 
-              />
-              <span className="slider"></span>
-            </label>
-          </div>
+          {account && (
+            <div className={`network-badge ${isWrongNetwork ? 'danger' : 'robinhood'}`} style={isWrongNetwork ? {color: 'var(--danger-color)', background: 'rgba(255,59,48,0.1)', borderColor: 'rgba(255,59,48,0.2)'} : {}}>
+              <div className="network-dot" style={isWrongNetwork ? {backgroundColor: 'var(--danger-color)'} : {}}></div>
+              {isWrongNetwork ? 'Unsupported Network' : 'Robinhood L2 Testnet'}
+            </div>
+          )}
 
           <button 
-            className={`btn-connect ${isWeb3Mode ? 'btn-connected' : ''}`}
-            onClick={connectWallet}
+            className={`btn-connect ${account ? 'btn-connected' : ''}`}
+            onClick={account ? null : connectWallet}
             disabled={web3Loading}
           >
             <Wallet size={16} />
@@ -389,351 +431,371 @@ export default function App() {
         </div>
       </header>
 
-      {/* Compliance Banner */}
-      <div className="compliance-banner">
-        <div className="compliance-info">
-          <div className="compliance-icon">
-            {kycStatus ? <ShieldCheck size={28} /> : <ShieldAlert size={28} style={{ color: 'var(--warning-color)' }} />}
+      {/* Main UI Overlay Lock when disconnected or on wrong network */}
+      {!isReady ? (
+        <div className="panel" style={{ padding: '4rem 2rem', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyItems: 'center', gap: '1.5rem', margin: '4rem 0' }}>
+          <div className="brand-logo" style={{ width: '64px', height: '64px', fontSize: '2rem', borderRadius: '18px' }}>R</div>
+          <div>
+            <h2 style={{ fontSize: '1.8rem', marginBottom: '0.5rem' }}>
+              {isWrongNetwork && account ? 'Switch to Robinhood L2 Testnet' : 'Connect Wallet to Access RobinLend'}
+            </h2>
+            <p style={{ color: 'var(--text-secondary)', maxWidth: '460px', fontSize: '0.95rem' }}>
+              {isWrongNetwork && account 
+                ? 'RobinLend runs exclusively on Robinhood Chain L2 Testnet (Chain ID 46630). Click below to update your network configuration.'
+                : 'RobinLend is a fully real, compliance-gated real-world asset lending protocol. Access the platform by connecting your MetaMask wallet.'}
+            </p>
           </div>
-          <div className="compliance-text">
-            <h4>{kycStatus ? 'Robinhood Identity Status: KYC CLEARED' : 'Robinhood Identity Status: KYC REQUIRED'}</h4>
-            <p>{kycStatus ? 'Your account is fully whitelisted to mint, trade, and lend compliant real-world assets.' : 'Deploying compliant financial assets requires a verified identity registry connection. Click verify to whitelist your wallet.'}</p>
-          </div>
+          
+          {isWrongNetwork && account ? (
+            <button className="btn-connect" onClick={switchNetwork}>
+              Switch Network to Robinhood L2
+            </button>
+          ) : (
+            <button className="btn-connect" onClick={connectWallet} disabled={web3Loading}>
+              <Wallet size={18} /> Connect MetaMask Wallet
+            </button>
+          )}
         </div>
-        {!kycStatus ? (
-          <button className="btn-verify" onClick={handleVerifyKYC} disabled={txLoading}>
-            Verify Wallet
-          </button>
-        ) : (
-          <div className="status-verified">
-            <CheckCircle2 size={14} /> KYC Active
-          </div>
-        )}
-      </div>
-
-      {/* Metrics Row */}
-      <div className="metrics-row" style={{ marginBottom: '1.5rem' }}>
-        <div className="metric-card">
-          <div className="metric-label">Net Collateral Value</div>
-          <div className="metric-value">${collateralValueUSD.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
-          <div className="metric-subvalue">{collateralDeposited} iUST deposited</div>
-        </div>
-        <div className="metric-card">
-          <div className="metric-label">Total Debt</div>
-          <div className="metric-value">${parseFloat(borrowedAmount).toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
-          <div className="metric-subvalue">{borrowedAmount} USDC borrowed</div>
-        </div>
-        <div className="metric-card">
-          <div className="metric-label">Available Borrow Capacity</div>
-          <div className="metric-value">${remainingBorrowCapacityUSD.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
-          <div className="metric-subvalue">70% Max LTV ratio limit</div>
-        </div>
-        <div className="metric-card">
-          <div className="metric-label">Health Factor</div>
-          <div className={`metric-value ${getHealthClass(healthFactor)}`}>
-            {parseFloat(healthFactor) > 9000 ? '∞' : healthFactor}
-          </div>
-          <div className="metric-subvalue">Liquidation triggers at &lt; 1.00</div>
-        </div>
-      </div>
-
-      {/* Main Grid */}
-      <div className="dashboard-grid">
-        {/* Left Column: Assets & Tables */}
-        <div className="main-column">
-          {/* Collateral Assets Panel */}
-          <div className="panel">
-            <div className="panel-title">
-              <div>Depositable Real-World Assets (Collateral)</div>
-              <div className="panel-subtitle">Tokenized securities clearing regulatory standards</div>
+      ) : (
+        <>
+          {/* Compliance Banner */}
+          <div className="compliance-banner">
+            <div className="compliance-info">
+              <div className="compliance-icon">
+                {kycStatus ? <ShieldCheck size={28} /> : <ShieldAlert size={28} style={{ color: 'var(--warning-color)' }} />}
+              </div>
+              <div className="compliance-text">
+                <h4>{kycStatus ? 'On-Chain Compliance Status: KYC CLEARED' : 'On-Chain Compliance Status: KYC REQUIRED'}</h4>
+                <p>{kycStatus ? 'Your address is whitelisted in the KYCRegistry contract. You are authorized to transact with compliant assets.' : 'Robinhood Chain requires regulatory compliance for RWA assets. Whitelist your wallet on-chain to access lending and faucet pools.'}</p>
+              </div>
             </div>
+            {!kycStatus ? (
+              <button className="btn-verify" onClick={handleVerifyKYC} disabled={txLoading}>
+                Register Identity On-Chain
+              </button>
+            ) : (
+              <div className="status-verified">
+                <CheckCircle2 size={14} /> KYC Active
+              </div>
+            )}
+          </div>
+
+          {/* Metrics Row */}
+          <div className="metrics-row" style={{ marginBottom: '1.5rem' }}>
+            <div className="metric-card">
+              <div className="metric-label">Net Collateral Value</div>
+              <div className="metric-value">${parseFloat(totalCollateralUSD).toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+              <div className="metric-subvalue">{collateralDeposited} iUST deposited</div>
+            </div>
+            <div className="metric-card">
+              <div className="metric-label">Total Debt</div>
+              <div className="metric-value">${parseFloat(totalBorrowedUSD).toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+              <div className="metric-subvalue">{borrowedAmount} USDC borrowed</div>
+            </div>
+            <div className="metric-card">
+              <div className="metric-label">Available Borrow Capacity</div>
+              <div className="metric-value">${parseFloat(borrowCapacityUSD).toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+              <div className="metric-subvalue">70% LTV borrow limit</div>
+            </div>
+            <div className="metric-card">
+              <div className="metric-label">Health Factor</div>
+              <div className={`metric-value ${getHealthClass(healthFactor)}`}>
+                {parseFloat(healthFactor) > 9000 ? '∞' : healthFactor}
+              </div>
+              <div className="metric-subvalue">Liquidation triggers at &lt; 1.00</div>
+            </div>
+          </div>
+
+          {/* Dashboard Grid */}
+          <div className="dashboard-grid">
             
-            <table className="asset-table">
-              <thead>
-                <tr>
-                  <th>Asset</th>
-                  <th>Price</th>
-                  <th>Wallet Balance</th>
-                  <th>Deposited</th>
-                  <th>RWA Yield (APY)</th>
-                  <th style={{ textAlign: 'right' }}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>
-                    <div className="asset-info">
-                      <div className="asset-logo ust">UST</div>
-                      <div>
-                        <div className="asset-symbol">iUST</div>
-                        <div className="asset-name">US Treasury Bills</div>
+            {/* Left Column: Actions */}
+            <div className="main-column">
+              {/* Depositable Assets Panel */}
+              <div className="panel">
+                <div className="panel-title">
+                  <div>Depositable Real-World Assets (Collateral)</div>
+                  <div className="panel-subtitle">On-chain tokenized securities clearing regulatory standards</div>
+                </div>
+                
+                <table className="asset-table">
+                  <thead>
+                    <tr>
+                      <th>Asset</th>
+                      <th>Price</th>
+                      <th>Wallet Balance</th>
+                      <th>Deposited</th>
+                      <th>RWA Yield (APY)</th>
+                      <th style={{ textAlign: 'right' }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>
+                        <div className="asset-info">
+                          <div className="asset-logo ust">UST</div>
+                          <div>
+                            <div className="asset-symbol">iUST</div>
+                            <div className="asset-name">US Treasury Bills</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="asset-price">${rwaPrice.toFixed(2)}</td>
+                      <td>{rwaBalance} iUST</td>
+                      <td style={{ fontWeight: 600 }}>{collateralDeposited} iUST</td>
+                      <td className="asset-yield">5.24% <TrendingUp size={12} style={{ display: 'inline', marginLeft: '3px' }} /></td>
+                      <td className="asset-action-cell">
+                        <div style={{ display: 'inline-flex', gap: '0.5rem', width: '220px' }}>
+                          <input 
+                            type="number" 
+                            placeholder="0.0" 
+                            className="input-field" 
+                            style={{ height: '34px', padding: '0.4rem 0.6rem', fontSize: '0.9rem' }}
+                            value={depositVal}
+                            onChange={(e) => setDepositVal(e.target.value)}
+                            disabled={txLoading || !kycStatus}
+                          />
+                          <button 
+                            className="btn-submit" 
+                            style={{ height: '34px', padding: '0.4rem 0.8rem', fontSize: '0.85rem', whiteSpace: 'nowrap', width: 'auto' }}
+                            onClick={handleDeposit}
+                            disabled={txLoading || !kycStatus || !depositVal}
+                          >
+                            Deposit
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                {/* SVG Performance Line graph */}
+                <div className="chart-container">
+                  <div style={{ position: 'absolute', top: 5, left: 10, fontSize: '0.75rem', color: 'var(--text-secondary)' }}>iUST Treasury Yield Performance Index (30D)</div>
+                  <svg className="chart-svg" viewBox="0 0 500 100" preserveAspectRatio="none">
+                    <defs>
+                      <linearGradient id="chart-gradient" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="var(--accent-color)" stopOpacity="0.2"/>
+                        <stop offset="100%" stopColor="var(--accent-color)" stopOpacity="0"/>
+                      </linearGradient>
+                    </defs>
+                    <path d="M 0,100 L 0,80 Q 50,60 100,75 T 200,50 T 300,55 T 400,30 T 500,20 L 500,100 Z" className="chart-fill-path" />
+                    <path d="M 0,80 Q 50,60 100,75 T 200,50 T 300,55 T 400,30 T 500,20" className="chart-glow-path" />
+                  </svg>
+                </div>
+
+                {/* Withdraw Panel */}
+                {parseFloat(collateralDeposited) > 0 && (
+                  <div className="action-box" style={{ marginTop: '0.5rem' }}>
+                    <div className="input-container">
+                      <div className="input-label-row">
+                        <span>Withdraw iUST Collateral</span>
+                        <span>Max: <span className="input-max-btn" onClick={() => setWithdrawVal(collateralDeposited)}>{collateralDeposited} iUST</span></span>
+                      </div>
+                      <div className="input-wrapper">
+                        <input 
+                          type="number" 
+                          placeholder="0.0" 
+                          className="input-field" 
+                          value={withdrawVal}
+                          onChange={(e) => setWithdrawVal(e.target.value)}
+                          disabled={txLoading}
+                        />
+                        <span className="input-token-tag">iUST</span>
                       </div>
                     </div>
-                  </td>
-                  <td className="asset-price">${rwaPrice.toFixed(2)}</td>
-                  <td>{rwaBalance} iUST</td>
-                  <td style={{ fontWeight: 600 }}>{collateralDeposited} iUST</td>
-                  <td className="asset-yield">5.24% <TrendingUp size={12} style={{ display: 'inline', marginLeft: '3px' }} /></td>
-                  <td className="asset-action-cell">
-                    <div style={{ display: 'inline-flex', gap: '0.5rem', width: '220px' }}>
-                      <input 
-                        type="number" 
-                        placeholder="0.0" 
-                        className="input-field" 
-                        style={{ height: '34px', padding: '0.4rem 0.6rem', fontSize: '0.9rem' }}
-                        value={depositVal}
-                        onChange={(e) => setDepositVal(e.target.value)}
-                        disabled={txLoading || !kycStatus}
-                      />
-                      <button 
-                        className="btn-submit" 
-                        style={{ height: '34px', padding: '0.4rem 0.8rem', fontSize: '0.85rem', whiteSpace: 'nowrap', width: 'auto' }}
-                        onClick={handleDeposit}
-                        disabled={txLoading || !kycStatus || !depositVal}
-                      >
-                        Deposit
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-
-            {/* Simulated Yield Trend line chart */}
-            <div className="chart-container">
-              <div style={{ position: 'absolute', top: 5, left: 10, fontSize: '0.75rem', color: 'var(--text-secondary)' }}>iUST Treasury Yield Performance (30D Index)</div>
-              <svg className="chart-svg" viewBox="0 0 500 100" preserveAspectRatio="none">
-                <defs>
-                  <linearGradient id="chart-gradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="var(--accent-color)" stopOpacity="0.2"/>
-                    <stop offset="100%" stopColor="var(--accent-color)" stopOpacity="0"/>
-                  </linearGradient>
-                </defs>
-                <path d="M 0,100 L 0,80 Q 50,60 100,75 T 200,50 T 300,55 T 400,30 T 500,20 L 500,100 Z" className="chart-fill-path" />
-                <path d="M 0,80 Q 50,60 100,75 T 200,50 T 300,55 T 400,30 T 500,20" className="chart-glow-path" />
-              </svg>
-            </div>
-
-            {/* Withdraw collapsible panel inside RWA Collateral */}
-            {parseFloat(collateralDeposited) > 0 && (
-              <div className="action-box" style={{ marginTop: '0.5rem' }}>
-                <div className="input-container">
-                  <div className="input-label-row">
-                    <span>Withdraw iUST Collateral</span>
-                    <span>Max: <span className="input-max-btn" onClick={() => setWithdrawVal(collateralDeposited)}>{collateralDeposited} iUST</span></span>
+                    <button 
+                      className="btn-submit btn-danger" 
+                      onClick={handleWithdraw}
+                      disabled={txLoading || !withdrawVal}
+                    >
+                      Withdraw iUST
+                    </button>
                   </div>
-                  <div className="input-wrapper">
-                    <input 
-                      type="number" 
-                      placeholder="0.0" 
-                      className="input-field" 
-                      value={withdrawVal}
-                      onChange={(e) => setWithdrawVal(e.target.value)}
-                      disabled={txLoading}
-                    />
-                    <span className="input-token-tag">iUST</span>
-                  </div>
-                </div>
-                <button 
-                  className="btn-submit btn-danger" 
-                  onClick={handleWithdraw}
-                  disabled={txLoading || !withdrawVal}
-                >
-                  Withdraw iUST
-                </button>
+                )}
               </div>
-            )}
-          </div>
 
-          {/* Borrow Stablecoins Panel */}
-          <div className="panel">
-            <div className="panel-title">
-              <div>Borrow Stablecoins</div>
-              <div className="panel-subtitle">Access liquid capital backed by regulatory assets</div>
-            </div>
+              {/* Borrow Stablecoins Panel */}
+              <div className="panel">
+                <div className="panel-title">
+                  <div>Borrow Stablecoins</div>
+                  <div className="panel-subtitle">Access liquid USDC capital backed by RWA assets</div>
+                </div>
 
-            <table className="asset-table">
-              <thead>
-                <tr>
-                  <th>Asset</th>
-                  <th>Price</th>
-                  <th>Wallet Balance</th>
-                  <th>Borrowed</th>
-                  <th>Borrow APY</th>
-                  <th style={{ textAlign: 'right' }}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>
-                    <div className="asset-info">
-                      <div className="asset-logo usdc">USDC</div>
-                      <div>
-                        <div className="asset-symbol">USDC</div>
-                        <div className="asset-name">Mock USD Stablecoin</div>
+                <table className="asset-table">
+                  <thead>
+                    <tr>
+                      <th>Asset</th>
+                      <th>Price</th>
+                      <th>Wallet Balance</th>
+                      <th>Borrowed</th>
+                      <th>Borrow APY</th>
+                      <th style={{ textAlign: 'right' }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>
+                        <div className="asset-info">
+                          <div className="asset-logo usdc">USDC</div>
+                          <div>
+                            <div className="asset-symbol">USDC</div>
+                            <div className="asset-name">Mock USD Stablecoin</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="asset-price">${usdcPrice.toFixed(2)}</td>
+                      <td>{usdcBalance} USDC</td>
+                      <td style={{ fontWeight: 600 }}>{borrowedAmount} USDC</td>
+                      <td style={{ color: 'var(--text-primary)', fontWeight: 600 }}>6.12%</td>
+                      <td className="asset-action-cell">
+                        <div style={{ display: 'inline-flex', gap: '0.5rem', width: '220px' }}>
+                          <input 
+                            type="number" 
+                            placeholder="0.0" 
+                            className="input-field" 
+                            style={{ height: '34px', padding: '0.4rem 0.6rem', fontSize: '0.9rem' }}
+                            value={borrowVal}
+                            onChange={(e) => setBorrowVal(e.target.value)}
+                            disabled={txLoading || parseFloat(collateralDeposited) === 0}
+                          />
+                          <button 
+                            className="btn-submit" 
+                            style={{ height: '34px', padding: '0.4rem 0.8rem', fontSize: '0.85rem', whiteSpace: 'nowrap', width: 'auto' }}
+                            onClick={handleBorrow}
+                            disabled={txLoading || parseFloat(collateralDeposited) === 0 || !borrowVal}
+                          >
+                            Borrow
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                {/* Repay Box */}
+                {parseFloat(borrowedAmount) > 0 && (
+                  <div className="action-box">
+                    <div className="input-container">
+                      <div className="input-label-row">
+                        <span>Repay borrowed USDC</span>
+                        <span>Max: <span className="input-max-btn" onClick={() => setRepayVal(borrowedAmount)}>{borrowedAmount} USDC</span></span>
+                      </div>
+                      <div className="input-wrapper">
+                        <input 
+                          type="number" 
+                          placeholder="0.0" 
+                          className="input-field" 
+                          value={repayVal}
+                          onChange={(e) => setRepayVal(e.target.value)}
+                          disabled={txLoading}
+                        />
+                        <span className="input-token-tag">USDC</span>
                       </div>
                     </div>
-                  </td>
-                  <td className="asset-price">${usdcPrice.toFixed(2)}</td>
-                  <td>{usdcBalance} USDC</td>
-                  <td style={{ fontWeight: 600 }}>{borrowedAmount} USDC</td>
-                  <td style={{ color: 'var(--text-primary)', fontWeight: 600 }}>6.12%</td>
-                  <td className="asset-action-cell">
-                    <div style={{ display: 'inline-flex', gap: '0.5rem', width: '220px' }}>
-                      <input 
-                        type="number" 
-                        placeholder="0.0" 
-                        className="input-field" 
-                        style={{ height: '34px', padding: '0.4rem 0.6rem', fontSize: '0.9rem' }}
-                        value={borrowVal}
-                        onChange={(e) => setBorrowVal(e.target.value)}
-                        disabled={txLoading || parseFloat(collateralDeposited) === 0}
-                      />
-                      <button 
-                        className="btn-submit" 
-                        style={{ height: '34px', padding: '0.4rem 0.8rem', fontSize: '0.85rem', whiteSpace: 'nowrap', width: 'auto' }}
-                        onClick={handleBorrow}
-                        disabled={txLoading || parseFloat(collateralDeposited) === 0 || !borrowVal}
-                      >
-                        Borrow
-                      </button>
+                    <button 
+                      className="btn-submit" 
+                      onClick={handleRepay}
+                      disabled={txLoading || !repayVal}
+                    >
+                      Repay USDC Loan
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Right Column: Console relayer */}
+            <div className="main-column" style={{ gap: '1rem' }}>
+              {/* Event Relayer Console Panel */}
+              <div className="panel" style={{ display: 'flex', flexGrow: '1', flexDirection: 'column', minHeight: '400px' }}>
+                <div className="panel-title" style={{ borderBottom: '1px solid var(--panel-border)', paddingBottom: '0.5rem', marginBottom: '0.8rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <Terminal size={18} style={{ color: 'var(--accent-color)' }} />
+                    <span>On-Chain Transaction Monitor</span>
+                  </div>
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>Robinhood L2 Network Logs</span>
+                </div>
+
+                {/* MetaMask Action Flow visualizer */}
+                <div className="userop-visualizer">
+                  <div className={`visualizer-node`}>
+                    <div className={`node-icon ${txLoading && activeStep === 'sign' ? 'active' : ''}`}>
+                      <Wallet size={14} />
                     </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-
-            {/* Repay Box collapsible */}
-            {parseFloat(borrowedAmount) > 0 && (
-              <div className="action-box">
-                <div className="input-container">
-                  <div className="input-label-row">
-                    <span>Repay borrowed USDC</span>
-                    <span>Max: <span className="input-max-btn" onClick={() => setRepayVal(borrowedAmount)}>{borrowedAmount} USDC</span></span>
+                    <div className="node-label">Sign Tx</div>
                   </div>
-                  <div className="input-wrapper">
-                    <input 
-                      type="number" 
-                      placeholder="0.0" 
-                      className="input-field" 
-                      value={repayVal}
-                      onChange={(e) => setRepayVal(e.target.value)}
-                      disabled={txLoading}
-                    />
-                    <span className="input-token-tag">USDC</span>
+                  <div className={`node-arrow ${txLoading && activeStep === 'sign' ? 'active' : ''}`}><ChevronRight size={14} /></div>
+                  
+                  <div className={`visualizer-node`}>
+                    <div className={`node-icon ${txLoading && activeStep === 'broadcast' ? 'active' : ''}`}>
+                      <ArrowRightLeft size={14} />
+                    </div>
+                    <div className="node-label">Mempool</div>
+                  </div>
+                  <div className={`node-arrow ${txLoading && activeStep === 'broadcast' ? 'active' : ''}`}><ChevronRight size={14} /></div>
+                  
+                  <div className={`visualizer-node`}>
+                    <div className={`node-icon ${txLoading && activeStep === 'confirm' ? 'active' : ''}`}>
+                      <CheckCircle2 size={14} />
+                    </div>
+                    <div className="node-label">Block Mine</div>
                   </div>
                 </div>
-                <button 
-                  className="btn-submit" 
-                  onClick={handleRepay}
-                  disabled={txLoading || !repayVal}
-                >
-                  Repay USDC Loan
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
 
-        {/* Right Column: AA Console Visualizer */}
-        <div className="main-column" style={{ gap: '1rem' }}>
-          {/* ZeroDev Account Abstraction Console panel */}
-          <div className="panel" style={{ display: 'flex', flexSpace: '1', flexDirection: 'column', minHeight: '400px' }}>
-            <div className="panel-title" style={{ borderBottom: '1px solid var(--panel-border)', paddingBottom: '0.5rem', marginBottom: '0.8rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <Terminal size={18} style={{ color: 'var(--accent-color)' }} />
-                <span>ZeroDev Gas Relayer Console</span>
-              </div>
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>ERC-4337 Account Abstraction</span>
-            </div>
-
-            {/* Animation flow visualizer */}
-            {gaslessEnabled && (
-              <div className="userop-visualizer">
-                <div className={`visualizer-node`}>
-                  <div className={`node-icon ${txLoading && activeNode === 'smartaccount' ? 'active' : ''}`}>
-                    <Cpu size={14} />
+                {/* Output console log */}
+                <div className="explorer-panel" style={{ flex: '1' }}>
+                  <div className="explorer-title">
+                    <span>Transaction History Log</span>
+                    <span className="explorer-status-badge">
+                      {txLoading ? 'AWAITING BLOCK' : 'ACTIVE'}
+                    </span>
                   </div>
-                  <div className="node-label">UserOp</div>
+                  
+                  {consoleLogs.map((log, index) => (
+                    <div key={index} className={`explorer-log-item ${log.type}`}>
+                      {log.timestamp && <span style={{ color: 'var(--text-muted)', marginRight: '6px' }}>[{log.timestamp}]</span>}
+                      {log.text}
+                    </div>
+                  ))}
+                  {txLoading && (
+                    <div className="explorer-log-item info" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <div className="spinner"></div> Indexing block transaction confirmation...
+                    </div>
+                  )}
                 </div>
-                <div className={`node-arrow ${txLoading && activeNode === 'smartaccount' ? 'active' : ''}`}><ChevronRight size={14} /></div>
+              </div>
+
+              {/* Faucet Box */}
+              <div className="panel" style={{ paddingBottom: '2.5rem' }}>
+                <div className="panel-title">
+                  <div>Robinhood Testnet Faucets</div>
+                </div>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>Claim on-chain mock tokens to fund your wallet for testing.</p>
                 
-                <div className={`visualizer-node`}>
-                  <div className={`node-icon ${txLoading && activeNode === 'bundler' ? 'active' : ''}`}>
-                    <ArrowRightLeft size={14} />
-                  </div>
-                  <div className="node-label">Bundler</div>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button className="btn-faucet" onClick={handleUSDCFaucet} disabled={txLoading}>
+                    Claim USDC Faucet
+                  </button>
+                  <button className="btn-faucet primary" onClick={handleRWAFaucet} disabled={txLoading || !kycStatus}>
+                    Claim iUST Faucet
+                  </button>
                 </div>
-                <div className={`node-arrow ${txLoading && activeNode === 'bundler' ? 'active' : ''}`}><ChevronRight size={14} /></div>
                 
-                <div className={`visualizer-node`}>
-                  <div className={`node-icon ${txLoading && activeNode === 'paymaster' ? 'active' : ''}`}>
-                    <Coins size={14} />
+                <div className="faucet-row">
+                  <div className="faucet-info">
+                    <span className="faucet-title">Robinhood Chain Gas Faucet</span>
+                    <span className="faucet-desc">Get testnet ETH to pay for transactions</span>
                   </div>
-                  <div className="node-label">Paymaster</div>
-                </div>
-                <div className={`node-arrow ${txLoading && activeNode === 'paymaster' ? 'active' : ''}`}><ChevronRight size={14} /></div>
-                
-                <div className={`visualizer-node`}>
-                  <div className={`node-icon ${txLoading && activeNode === 'entrypoint' ? 'active' : ''}`}>
-                    <ShieldCheck size={14} />
-                  </div>
-                  <div className="node-label">L2 Node</div>
+                  <a href="https://faucet.testnet.chain.robinhood.com/" target="_blank" rel="noreferrer" className="btn-faucet" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    Open Faucet <ExternalLink size={12} />
+                  </a>
                 </div>
               </div>
-            )}
-
-            {/* Output console log */}
-            <div className="explorer-panel" style={{ flex: '1' }}>
-              <div className="explorer-title">
-                <span>Relayer Node Status</span>
-                <span className="explorer-status-badge">
-                  {txLoading ? 'PROCESSING UserOp' : 'LISTENING'}
-                </span>
-              </div>
-              
-              {consoleLogs.map((log, index) => (
-                <div key={index} className={`explorer-log-item ${log.type}`}>
-                  {log.timestamp && <span style={{ color: 'var(--text-muted)', marginRight: '6px' }}>[{log.timestamp}]</span>}
-                  {log.text}
-                </div>
-              ))}
-              {txLoading && (
-                <div className="explorer-log-item info" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', borderLeftColor: 'var(--accent-color)' }}>
-                  <div className="spinner"></div> Mining transaction on Robinhood Chain L2...
-                </div>
-              )}
             </div>
           </div>
-
-          {/* Test Faucets Controls Card */}
-          <div className="panel" style={{ paddingBottom: '2.5rem' }}>
-            <div className="panel-title">
-              <div>Robinhood Testnet Faucets</div>
-            </div>
-            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>Claim mock tokens to test RWA collateralized borrowing positions.</p>
-            
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
-              <button className="btn-faucet" onClick={handleUSDCFaucet}>
-                +1,000 USDC Faucet
-              </button>
-              <button className="btn-faucet primary" onClick={handleRWAFaucet}>
-                +50 iUST RWA Faucet
-              </button>
-            </div>
-            
-            <div className="faucet-row">
-              <div className="faucet-info">
-                <span className="faucet-title">Robinhood Chain Gas Faucet</span>
-                <span className="faucet-desc">Get testnet ETH gas tokens</span>
-              </div>
-              <a href="https://faucet.testnet.chain.robinhood.com/" target="_blank" rel="noreferrer" className="btn-faucet" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                Open Faucet <ExternalLink size={12} />
-              </a>
-            </div>
-          </div>
-        </div>
-      </div>
+        </>
+      )}
     </div>
   );
 }

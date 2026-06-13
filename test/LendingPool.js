@@ -55,6 +55,31 @@ describe("RobinLend Protocol", function () {
   });
 
   describe("Compliance (KYC Registry & RWAToken)", function () {
+    it("Should allow self-service KYC registration", async function () {
+      expect(await kycRegistry.isVerified(Alice.address)).to.be.false;
+      await kycRegistry.connect(Alice).register();
+      expect(await kycRegistry.isVerified(Alice.address)).to.be.true;
+    });
+
+    it("Should allow claiming RWA faucet only for KYC verified addresses", async function () {
+      // Un-verified Alice claims faucet (should revert)
+      await expect(
+        rwaToken.connect(Alice).faucet(ethers.parseEther("50"))
+      ).to.be.revertedWith("RWAToken: account is not KYC verified");
+
+      // Verify Alice via self-register
+      await kycRegistry.connect(Alice).register();
+
+      // Alice claims faucet
+      await rwaToken.connect(Alice).faucet(ethers.parseEther("50"));
+      expect(await rwaToken.balanceOf(Alice.address)).to.equal(ethers.parseEther("50"));
+
+      // Try claiming over faucet limit (reverts)
+      await expect(
+        rwaToken.connect(Alice).faucet(ethers.parseEther("1001"))
+      ).to.be.revertedWith("RWAToken: faucet limit exceeded");
+    });
+
     it("Should restrict minting to KYC verified addresses", async function () {
       // Un-verified Alice
       await expect(
