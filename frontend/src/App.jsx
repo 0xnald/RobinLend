@@ -81,6 +81,15 @@ export default function App() {
   // --- Navigation View State ---
   const [view, setView] = useState('landing'); // 'landing' | 'app' | 'docs'
   const [activeDocSection, setActiveDocSection] = useState('intro'); // 'intro' | 'kyc' | 'faucet' | 'ltv' | 'addresses'
+  
+  const [globalTVL, setGlobalTVL] = useState("2450180.00");
+  const [globalActiveBorrows, setGlobalActiveBorrows] = useState("1120400.00");
+
+  const formatStatUSD = (val) => {
+    const parsed = parseFloat(val);
+    if (isNaN(parsed)) return "$...";
+    return "$" + parsed.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
 
   // --- Web3 Connection State ---
   const [provider, setProvider] = useState(null);
@@ -256,6 +265,53 @@ export default function App() {
     }
     setWeb3Loading(false);
   };
+
+  // --- Fetch Global Stats from Chain ---
+  useEffect(() => {
+    const fetchGlobalStats = async () => {
+      try {
+        const rpcProvider = new ethers.JsonRpcProvider("https://rpc.testnet.chain.robinhood.com");
+        const poolAddress = contractAddresses.lendingPool;
+        const oracleContract = new ethers.Contract(contractAddresses.priceOracle, priceOracleABI, rpcProvider);
+        const usdcContract = new ethers.Contract(contractAddresses.usdc, usdcTokenABI, rpcProvider);
+
+        // 1. Calculate Active Borrows: 1,000,000 USDC - LendingPool USDC Balance
+        const poolUsdcBal = await usdcContract.balanceOf(poolAddress);
+        const maxInitialUSDC = ethers.parseEther("1000000");
+        let activeBorrows = 0n;
+        if (maxInitialUSDC > poolUsdcBal) {
+          activeBorrows = maxInitialUSDC - poolUsdcBal;
+        }
+        setGlobalActiveBorrows(parseFloat(ethers.formatEther(activeBorrows)).toFixed(2));
+
+        // 2. Calculate TVL: Sum up the USD values of all stock tokens held by the LendingPool
+        let tvlUSD = 0;
+        const symbols = Object.keys(contractAddresses.tokens);
+        for (const symbol of symbols) {
+          const tokenAddress = contractAddresses.tokens[symbol];
+          const tokenContract = new ethers.Contract(tokenAddress, rwaTokenABI, rpcProvider);
+          
+          const poolBal = await tokenContract.balanceOf(poolAddress);
+          
+          try {
+            const price = await oracleContract.getAssetPrice(tokenAddress);
+            const formattedPrice = parseFloat(ethers.formatUnits(price, 8));
+            const formattedBal = parseFloat(ethers.formatEther(poolBal));
+            tvlUSD += formattedBal * formattedPrice;
+          } catch (e) {
+            console.error(`Failed to load price/balance for ${symbol}:`, e);
+          }
+        }
+        setGlobalTVL(tvlUSD.toFixed(2));
+      } catch (err) {
+        console.error("Failed to load global protocol stats:", err);
+      }
+    };
+
+    fetchGlobalStats();
+    const interval = setInterval(fetchGlobalStats, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   // --- Watch Account & Network Changes ---
   useEffect(() => {
@@ -700,11 +756,11 @@ export default function App() {
             <div className="stats-grid">
               <div className="stats-item">
                 <span className="stats-label">Total Value Locked</span>
-                <span className="stats-value">$2,450,180</span>
+                <span className="stats-value">{formatStatUSD(globalTVL)}</span>
               </div>
               <div className="stats-item">
                 <span className="stats-label">Active Borrows</span>
-                <span className="stats-value">$1,120,400</span>
+                <span className="stats-value">{formatStatUSD(globalActiveBorrows)}</span>
               </div>
               <div className="stats-item">
                 <span className="stats-label">Protocol APY</span>
