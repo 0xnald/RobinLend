@@ -82,8 +82,8 @@ export default function App() {
   const [view, setView] = useState('landing'); // 'landing' | 'app' | 'docs'
   const [activeDocSection, setActiveDocSection] = useState('intro'); // 'intro' | 'kyc' | 'faucet' | 'ltv' | 'addresses'
   
-  const [globalTVL, setGlobalTVL] = useState("2450180.00");
-  const [globalActiveBorrows, setGlobalActiveBorrows] = useState("1120400.00");
+  const [globalTVL, setGlobalTVL] = useState("...");
+  const [globalActiveBorrows, setGlobalActiveBorrows] = useState("...");
 
   const formatStatUSD = (val) => {
     const parsed = parseFloat(val);
@@ -112,7 +112,7 @@ export default function App() {
   const [totalCollateralUSD, setTotalCollateralUSD] = useState("0.0");
   const [totalBorrowedUSD, setTotalBorrowedUSD] = useState("0.0");
   const [borrowCapacityUSD, setBorrowCapacityUSD] = useState("0.0");
-  const [healthFactor, setHealthFactor] = useState("9999.0");
+  const [healthFactor, setHealthFactor] = useState("...");
 
   // Transaction state
   const [txLoading, setTxLoading] = useState(false);
