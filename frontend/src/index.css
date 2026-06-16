@@ -1274,3 +1274,234 @@ body {
   font-family: var(--font-mono);
   color: var(--text-primary);
 }
+
+/* Wallet Dropdown Menu */
+.wallet-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  background-color: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 0.6rem;
+  min-width: 220px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+  animation: fadeInDropdown 0.2s ease-out;
+}
+
+@keyframes fadeInDropdown {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.wallet-dropdown-item {
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-align: left;
+  transition: background-color 0.2s;
+  width: 100%;
+}
+
+.wallet-dropdown-item:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+  color: var(--accent-color);
+}
+
+.wallet-dropdown-item.danger {
+  color: #ff4a4a;
+}
+
+.wallet-dropdown-item.danger:hover {
+  background-color: rgba(255, 74, 74, 0.08);
+}
+
+.wallet-dropdown-header {
+  padding: 0.4rem 0.8rem;
+  border-bottom: 1px solid var(--panel-border);
+  margin-bottom: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-family: monospace;
+  word-break: break-all;
+}
+
+/* Switch Toggle & Card Styles */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 20px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #444;
+  transition: .4s;
+  border-radius: 34px;
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 14px;
+  width: 14px;
+  left: 4px;
+  bottom: 3px;
+  background-color: white;
+  transition: .4s;
+  border-radius: 50%;
+}
+
+input:checked + .slider {
+  background-color: var(--accent-color);
+}
+
+input:checked + .slider:before {
+  transform: translateX(18px);
+}
+
+.deposit-option-card {
+  border: 1px solid var(--panel-border);
+  background-color: rgba(255, 255, 255, 0.02);
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+.deposit-option-card:hover {
+  border-color: var(--accent-color);
+  background-color: rgba(48, 184, 136, 0.04);
+}
+
+/* Modal Overlay and centering */
+.wallet-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 12, 24, 0.8);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  animation: fadeIn 0.2s ease-out;
+}
+
+/* Centered Modal Content Card */
+.wallet-modal {
+  background-color: #001830;
+  border: 1px solid var(--panel-border);
+  border-radius: 16px;
+  width: 90%;
+  max-width: 480px;
+  padding: 1.8rem;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(48, 184, 136, 0.15);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+  animation: slideInUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  color: var(--text-primary);
+  box-sizing: border-box;
+}
+
+/* Modal Title */
+.wallet-modal-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--panel-border);
+  padding-bottom: 0.8rem;
+}
+
+/* Modal Close Button */
+.wallet-modal-close {
+  position: absolute;
+  top: 1.25rem;
+  right: 1.25rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--panel-border);
+  color: var(--text-secondary);
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 0.85rem;
+  font-weight: bold;
+}
+
+.wallet-modal-close:hover {
+  background: rgba(255, 74, 74, 0.12);
+  color: #ff4a4a;
+  border-color: rgba(255, 74, 74, 0.25);
+  transform: rotate(90deg);
+}
+
+/* QR Code Container */
+.qr-code-placeholder {
+  background: #FFFFFF;
+  padding: 0.8rem;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  margin: 0.5rem 0;
+}
+
+.qr-code-placeholder img {
+  width: 160px;
+  height: 160px;
+  display: block;
+}
+
+/* Max Button inside Amount Input */
+.input-max-btn {
+  color: var(--accent-color);
+  cursor: pointer;
+  font-weight: 700;
+  text-decoration: underline;
+  transition: color 0.2s;
+}
+
+.input-max-btn:hover {
+  color: #FFFFFF;
+}

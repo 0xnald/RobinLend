@@ -1,4 +1,6 @@
 {
+  "privyAppId": "cloc4a14s0014ky08z98sdc6y",
+  "zerodevProjectId": "REPLACE_WITH_ZERODEV_PROJECT_ID",
   "kycRegistry": "0x9C186af52067C58Bb98189327Ea4450c9385aFea",
   "usdc": "0xee8327a93b396B1437f48f8D768354bd4beb8520",
   "priceOracle": "0x563399954F911474e2CEbc0689F0484BEd74D281",

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   ShieldCheck, 
   ShieldAlert, 
@@ -14,9 +14,13 @@ import {
   ChevronRight,
   TrendingUp,
   Settings,
-  Sparkles
+  Sparkles,
+  Copy,
+  LogOut,
+  Check
 } from 'lucide-react';
 import { ethers } from 'ethers';
+import { usePrivy, useWallets, useCreateWallet } from '@privy-io/react-auth';
 import contractAddresses from './config.json';
 
 // ABIs for real contract interactions
@@ -27,13 +31,15 @@ const kycRegistryABI = [
 const rwaTokenABI = [
   "function balanceOf(address account) view returns (uint256)",
   "function approve(address spender, uint256 value) external returns (bool)",
-  "function allowance(address owner, address spender) view returns (uint256)"
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function transfer(address to, uint256 value) external returns (bool)"
 ];
 const usdcTokenABI = [
   "function balanceOf(address account) view returns (uint256)",
   "function approve(address spender, uint256 value) external returns (bool)",
   "function allowance(address owner, address spender) view returns (uint256)",
-  "function faucet(address to, uint256 amount) external"
+  "function faucet(address to, uint256 amount) external",
+  "function transfer(address to, uint256 value) external returns (bool)"
 ];
 const lendingPoolABI = [
   "function getAccountData(address user) view returns (uint256 totalCollateralUSD, uint256 totalBorrowedUSD, uint256 borrowCapacityUSD, uint256 healthFactor)",
@@ -64,6 +70,16 @@ const STOCK_CONFIGS = {
   AMD: { name: "Advanced Micro Devices", logoClass: "amd-logo", color: "#000000" }
 };
 
+const ALL_ASSETS = [
+  { symbol: 'USDC', name: 'Mock USDC' },
+  { symbol: 'ETH', name: 'Ethereum' },
+  { symbol: 'TSLA', name: 'Tesla Inc.' },
+  { symbol: 'AMZN', name: 'Amazon.com Inc.' },
+  { symbol: 'PLTR', name: 'Palantir Technologies' },
+  { symbol: 'NFLX', name: 'Netflix Inc.' },
+  { symbol: 'AMD', name: 'Advanced Micro Devices' }
+];
+
 // Social Icons SVGs to ensure they render without package version mismatch
 const TwitterIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
@@ -78,6 +94,41 @@ const GithubIcon = () => (
 );
 
 export default function App() {
+  const { login, logout, authenticated, ready, user, openUserProfile } = usePrivy();
+  const { wallets } = useWallets();
+  const { createWallet } = useCreateWallet();
+
+  const [showWalletDropdown, setShowWalletDropdown] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const dropdownRef = useRef(null);
+
+  // Deposit / Withdraw Modal States
+  const [showDepositModal, setShowDepositModal] = useState(false);
+  const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+  const [depositAsset, setDepositAsset] = useState('USDC');
+  const [withdrawAsset, setWithdrawAsset] = useState('USDC');
+  const [depositAmount, setDepositAmount] = useState('');
+  const [withdrawAmount, setWithdrawAmount] = useState('');
+  const [withdrawRecipient, setWithdrawRecipient] = useState('');
+  const [depositFromWalletLoading, setDepositFromWalletLoading] = useState(false);
+  const [withdrawLoading, setWithdrawLoading] = useState(false);
+  const [showDepositAssetDropdown, setShowDepositAssetDropdown] = useState(false);
+  const [showWithdrawAssetDropdown, setShowWithdrawAssetDropdown] = useState(false);
+  const [depositFlow, setDepositFlow] = useState('select'); // 'select' | 'connected' | 'external'
+  const [ethBalance, setEthBalance] = useState("0.0000");
+
+  const getAssetBalance = (symbol) => {
+    if (symbol === 'ETH') return ethBalance;
+    if (symbol === 'USDC') return usdcBalance;
+    return walletBalances[symbol] || "0.00";
+  };
+
+  const getAssetColor = (symbol) => {
+    if (symbol === 'ETH') return '#627EEA';
+    if (symbol === 'USDC') return '#2775CA';
+    return STOCK_CONFIGS[symbol]?.color || '#FFFFFF';
+  };
+
   // --- Navigation View State ---
   const [view, setView] = useState('landing'); // 'landing' | 'app' | 'docs'
   const [activeDocSection, setActiveDocSection] = useState('intro'); // 'intro' | 'kyc' | 'faucet' | 'ltv' | 'addresses'
@@ -134,6 +185,113 @@ export default function App() {
     setConsoleLogs(prev => [...prev, { type, text, timestamp: new Date().toLocaleTimeString() }]);
   };
 
+  const handleCopyAddress = () => {
+    if (!account) return;
+    navigator.clipboard.writeText(account);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  // Close dropdown on click outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setShowWalletDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const handleDepositFromConnectedWallet = async (e) => {
+    e.preventDefault();
+    if (!window.ethereum || !depositAmount || !depositAsset) return;
+    setDepositFromWalletLoading(true);
+    addConsoleLog('info', `Requesting transfer of ${depositAmount} ${depositAsset} from MetaMask to embedded wallet...`);
+    try {
+      // Connect to MetaMask provider
+      const tempProvider = new ethers.BrowserProvider(window.ethereum);
+      const tempSigner = await tempProvider.getSigner();
+      
+      let tx;
+      if (depositAsset === 'ETH') {
+        tx = await tempSigner.sendTransaction({
+          to: account,
+          value: ethers.parseEther(depositAmount)
+        });
+      } else {
+        // USDC or Stock Token
+        let tokenAddress;
+        if (depositAsset === 'USDC') {
+          tokenAddress = contractAddresses.usdc;
+        } else {
+          tokenAddress = contractAddresses.tokens[depositAsset];
+        }
+        
+        const tokenContract = new ethers.Contract(tokenAddress, rwaTokenABI, tempSigner);
+        tx = await tokenContract.transfer(account, ethers.parseEther(depositAmount));
+      }
+      
+      addConsoleLog('info', `Deposit transfer broadcasted! Hash: ${tx.hash}`);
+      await tx.wait();
+      addConsoleLog('success', `Deposited ${depositAmount} ${depositAsset} successfully from connected wallet.`);
+      
+      setDepositAmount('');
+      setDepositFlow('select');
+      setShowDepositModal(false);
+      
+      // Refresh balances
+      await fetchOnChainData(account, signer, provider);
+    } catch (err) {
+      console.error(err);
+      addConsoleLog('danger', `Connected wallet deposit failed: ${err.reason || err.message}`);
+    }
+    setDepositFromWalletLoading(false);
+  };
+
+  const handleWithdrawFunds = async (e) => {
+    e.preventDefault();
+    if (!signer || !withdrawRecipient || !withdrawAmount || !withdrawAsset) return;
+    setWithdrawLoading(true);
+    addConsoleLog('info', `Initiating withdrawal of ${withdrawAmount} ${withdrawAsset} to ${withdrawRecipient}...`);
+    try {
+      let tx;
+      if (withdrawAsset === 'ETH') {
+        tx = await signer.sendTransaction({
+          to: withdrawRecipient,
+          value: ethers.parseEther(withdrawAmount)
+        });
+      } else {
+        // USDC or Stock Token
+        let tokenAddress;
+        if (withdrawAsset === 'USDC') {
+          tokenAddress = contractAddresses.usdc;
+        } else {
+          tokenAddress = contractAddresses.tokens[withdrawAsset];
+        }
+        
+        const tokenContract = new ethers.Contract(tokenAddress, rwaTokenABI, signer);
+        tx = await tokenContract.transfer(withdrawRecipient, ethers.parseEther(withdrawAmount));
+      }
+      
+      addConsoleLog('info', `Withdrawal transaction broadcasted! Hash: ${tx.hash}`);
+      await tx.wait();
+      addConsoleLog('success', `Withdrawal of ${withdrawAmount} ${withdrawAsset} completed successfully.`);
+      
+      // Reset states
+      setWithdrawAmount('');
+      setWithdrawRecipient('');
+      setShowWithdrawModal(false);
+      
+      // Refresh balances
+      await fetchOnChainData(account, signer, provider);
+    } catch (err) {
+      console.error(err);
+      addConsoleLog('danger', `Withdrawal failed: ${err.reason || err.message}`);
+    }
+    setWithdrawLoading(false);
+  };
+
   // --- Fetch On-Chain Data ---
   const fetchOnChainData = useCallback(async (currentAccount, currentSigner, currentProvider) => {
     if (!currentAccount || !currentSigner || !currentProvider) return;
@@ -148,6 +306,10 @@ export default function App() {
       // 1. Fetch KYC Verification status
       const kycVerified = await kycContract.isVerified(currentAccount);
       setKycStatus(kycVerified);
+
+      // Fetch native ETH balance
+      const ethBal = await currentProvider.getBalance(currentAccount);
+      setEthBalance(parseFloat(ethers.formatEther(ethBal)).toFixed(4));
 
       // 2. Fetch USDC Wallet Balance & borrowed amount
       const usdcBal = await usdcContract.balanceOf(currentAccount);
@@ -208,81 +370,126 @@ export default function App() {
 
   // --- Network Switcher ---
   const switchNetwork = async () => {
-    if (!window.ethereum) {
-      alert("No Ethereum wallet (like MetaMask) detected. Please install a wallet to continue.");
-      return;
-    }
-    try {
-      await window.ethereum.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: '0xb626' }] // 46630 in hex
-      });
-    } catch (switchError) {
-      console.error("Switch network error:", switchError);
-      
-      // Check if chain is unrecognized (code 4902, or message/data indicates it's missing)
-      const isChainMissing = 
-        switchError.code === 4902 || 
-        (switchError.message && switchError.message.toLowerCase().includes("unrecognized")) ||
-        (switchError.data && typeof switchError.data === 'object' && 
-          (switchError.data.code === 4902 || 
-           (switchError.data.originalError && switchError.data.originalError.code === 4902)));
-
-      if (isChainMissing) {
-        try {
-          await window.ethereum.request({
-            method: 'wallet_addEthereumChain',
-            params: [{
-              chainId: '0xb626',
-              chainName: 'Robinhood Chain Testnet',
-              rpcUrls: ['https://rpc.testnet.chain.robinhood.com'],
-              nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-              blockExplorerUrls: [EXPLORER_URL]
-            }]
-          });
-        } catch (addError) {
-          console.error("Failed to add network:", addError);
-          alert(`Failed to add Robinhood Chain Testnet: ${addError.message || addError}`);
-        }
-      } else {
-        alert(`Failed to switch to Robinhood Chain Testnet: ${switchError.message || switchError}`);
+    if (wallets.length > 0) {
+      const activeWallet = wallets[0];
+      try {
+        await activeWallet.switchChain(ROBINHOOD_CHAIN_ID);
+        addConsoleLog('info', `Switched network to Chain ID: ${ROBINHOOD_CHAIN_ID}`);
+      } catch (err) {
+        console.error("Failed to switch network via Privy:", err);
+        addConsoleLog('danger', `Failed to switch network: ${err.message || err}`);
       }
+    } else if (window.ethereum) {
+      try {
+        await window.ethereum.request({
+          method: 'wallet_switchEthereumChain',
+          params: [{ chainId: '0xb626' }] // 46630 in hex
+        });
+      } catch (switchError) {
+        console.error("Switch network error:", switchError);
+        const isChainMissing = 
+          switchError.code === 4902 || 
+          (switchError.message && switchError.message.toLowerCase().includes("unrecognized")) ||
+          (switchError.data && typeof switchError.data === 'object' && 
+            (switchError.data.code === 4902 || 
+             (switchError.data.originalError && switchError.data.originalError.code === 4902)));
+
+        if (isChainMissing) {
+          try {
+            await window.ethereum.request({
+              method: 'wallet_addEthereumChain',
+              params: [{
+                chainId: '0xb626',
+                chainName: 'Robinhood Chain Testnet',
+                rpcUrls: ['https://rpc.testnet.chain.robinhood.com'],
+                nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+                blockExplorerUrls: [EXPLORER_URL]
+              }]
+            });
+          } catch (addError) {
+            console.error("Failed to add network:", addError);
+            alert(`Failed to add Robinhood Chain Testnet: ${addError.message || addError}`);
+          }
+        } else {
+          alert(`Failed to switch to Robinhood Chain Testnet: ${switchError.message || switchError}`);
+        }
+      }
+    } else {
+      alert("No Ethereum wallet detected. Please log in first.");
     }
   };
 
   // --- Wallet Connection ---
   const connectWallet = async () => {
-    if (!window.ethereum) {
-      alert("An EVM wallet (like MetaMask) is required to interact with RobinLend.");
+    if (!ready) {
+      addConsoleLog('warning', 'Authentication provider is initializing. Please wait a moment.');
       return;
     }
     setWeb3Loading(true);
     try {
-      const tempProvider = new ethers.BrowserProvider(window.ethereum);
-      const accounts = await tempProvider.send("eth_requestAccounts", []);
-      const tempSigner = await tempProvider.getSigner();
-      const network = await tempProvider.getNetwork();
-      const networkChainId = Number(network.chainId);
-
-      setProvider(tempProvider);
-      setSigner(tempSigner);
-      setAccount(accounts[0]);
-      setChainId(networkChainId);
-
-      addConsoleLog('success', `Connected Wallet: ${accounts[0].slice(0, 6)}...${accounts[0].slice(-4)}`);
-      
-      if (networkChainId !== ROBINHOOD_CHAIN_ID) {
-        addConsoleLog('warning', `Unsupported chain (ID: ${networkChainId}). Prompting network switch...`);
-        await switchNetwork();
-      } else {
-        await fetchOnChainData(accounts[0], tempSigner, tempProvider);
-      }
+      login();
     } catch (err) {
       console.error(err);
       addConsoleLog('danger', `Connection failed: ${err.message}`);
     }
     setWeb3Loading(false);
   };
+
+  // --- Sync Privy Wallets with Ethers.js provider/signer ---
+  useEffect(() => {
+    const initWallet = async () => {
+      if (wallets.length > 0) {
+        const activeWallet = wallets[0];
+        try {
+          const eip119Provider = await activeWallet.getEthereumProvider();
+          const tempProvider = new ethers.BrowserProvider(eip119Provider);
+          const tempSigner = await tempProvider.getSigner();
+          
+          setProvider(tempProvider);
+          setSigner(tempSigner);
+          setAccount(activeWallet.address);
+          
+          const parsedChainId = activeWallet.chainId && activeWallet.chainId.includes(':')
+            ? parseInt(activeWallet.chainId.split(':').pop(), 10)
+            : parseInt(activeWallet.chainId, 10);
+          setChainId(parsedChainId);
+          
+          addConsoleLog('success', `Connected Wallet: ${activeWallet.address.slice(0, 6)}...${activeWallet.address.slice(-4)}`);
+          
+          if (parsedChainId !== ROBINHOOD_CHAIN_ID) {
+            addConsoleLog('warning', `Unsupported chain (ID: ${parsedChainId}). Prompting network switch...`);
+            await switchNetwork();
+          } else {
+            await fetchOnChainData(activeWallet.address, tempSigner, tempProvider);
+          }
+        } catch (err) {
+          console.error("Failed to initialize wallet provider:", err);
+          addConsoleLog('danger', `Failed to initialize wallet provider: ${err.message}`);
+        }
+      } else {
+        setProvider(null);
+        setSigner(null);
+        setAccount("");
+        setChainId(null);
+      }
+    };
+    initWallet();
+  }, [wallets, fetchOnChainData]);
+
+  // Auto-create embedded wallet if authenticated but no wallet exists
+  useEffect(() => {
+    if (ready && authenticated && wallets.length === 0) {
+      addConsoleLog('info', 'Creating secure embedded wallet for social sign-in...');
+      createWallet()
+        .then((wallet) => {
+          addConsoleLog('success', `Embedded wallet created successfully: ${wallet.address}`);
+        })
+        .catch((err) => {
+          console.error("Failed to create embedded wallet:", err);
+          addConsoleLog('danger', `Failed to create embedded wallet: ${err.message || err}`);
+        });
+    }
+  }, [ready, authenticated, wallets, createWallet]);
 
   // --- Fetch Global Stats from Chain ---
   useEffect(() => {
@@ -331,47 +538,7 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // --- Watch Account & Network Changes ---
-  useEffect(() => {
-    if (window.ethereum) {
-      const handleAccountsChanged = async (accounts) => {
-        if (accounts.length > 0) {
-          setAccount(accounts[0]);
-          addConsoleLog('info', `Switched account: ${accounts[0].slice(0, 6)}...`);
-          const tempProvider = new ethers.BrowserProvider(window.ethereum);
-          const tempSigner = await tempProvider.getSigner();
-          setProvider(tempProvider);
-          setSigner(tempSigner);
-          await fetchOnChainData(accounts[0], tempSigner, tempProvider);
-        } else {
-          setAccount("");
-          setSigner(null);
-          addConsoleLog('warning', 'Wallet disconnected.');
-        }
-      };
 
-      const handleChainChanged = (hexChainId) => {
-        const decChainId = Number(hexChainId);
-        setChainId(decChainId);
-        addConsoleLog('info', `Switched network to Chain ID: ${decChainId}`);
-        window.location.reload();
-      };
-
-      window.ethereum.on('accountsChanged', handleAccountsChanged);
-      window.ethereum.on('chainChanged', handleChainChanged);
-
-      window.ethereum.request({ method: 'eth_accounts' }).then(accounts => {
-        if (accounts.length > 0) {
-          connectWallet();
-        }
-      });
-
-      return () => {
-        window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
-        window.ethereum.removeListener('chainChanged', handleChainChanged);
-      };
-    }
-  }, [fetchOnChainData]);
 
   // --- Run On-Chain Transaction Wrapper ---
   const runTransaction = async (actionLabel, transactionFn) => {
@@ -943,14 +1110,48 @@ export default function App() {
                 </div>
               )}
 
-              <button 
-                className={`btn-connect ${account ? 'btn-connected' : ''}`}
-                onClick={account ? null : connectWallet}
-                disabled={web3Loading}
+              <div 
+                ref={dropdownRef}
+                className="wallet-menu-container" 
+                style={{ position: 'relative' }}
               >
-                <Wallet size={16} />
-                {web3Loading ? 'Connecting...' : account ? `${account.slice(0, 6)}...${account.slice(-4)}` : 'Connect Wallet'}
-              </button>
+                <button 
+                  className={`btn-connect ${account ? 'btn-connected' : ''}`}
+                  onClick={account ? () => setShowWalletDropdown(!showWalletDropdown) : connectWallet}
+                  disabled={web3Loading || (!account && !ready)}
+                >
+                  <Wallet size={16} />
+                  {web3Loading ? 'Connecting...' : !account && !ready ? 'Initializing...' : account ? `${account.slice(0, 6)}...${account.slice(-4)}` : 'Connect Wallet'}
+                </button>
+
+                {account && showWalletDropdown && (
+                  <div className="wallet-dropdown-menu">
+                    <div className="wallet-dropdown-header">
+                      {account}
+                    </div>
+                    <button className="wallet-dropdown-item" onClick={handleCopyAddress}>
+                      {copied ? <Check size={14} style={{ color: 'var(--accent-color)' }} /> : <Copy size={14} />}
+                      {copied ? 'Copied!' : 'Copy Address'}
+                    </button>
+                    <button className="wallet-dropdown-item" onClick={() => { setShowWalletDropdown(false); setShowDepositModal(true); }}>
+                      <Coins size={14} />
+                      Deposit
+                    </button>
+                    <button className="wallet-dropdown-item" onClick={() => { setShowWalletDropdown(false); setShowWithdrawModal(true); }}>
+                      <ArrowRightLeft size={14} />
+                      Withdraw
+                    </button>
+                    <button className="wallet-dropdown-item" onClick={() => { setShowWalletDropdown(false); openUserProfile(); }}>
+                      <Settings size={14} />
+                      Manage Accounts
+                    </button>
+                    <button className="wallet-dropdown-item danger" onClick={() => { setShowWalletDropdown(false); logout(); }}>
+                      <LogOut size={14} />
+                      Disconnect
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </header>
 
@@ -974,9 +1175,25 @@ export default function App() {
                   Switch Network to Robinhood L2
                 </button>
               ) : (
-                <button className="btn-connect" onClick={connectWallet} disabled={web3Loading}>
-                  <Wallet size={18} /> Connect MetaMask Wallet
-                </button>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', width: '280px' }}>
+                  <button className="btn-connect" onClick={connectWallet} disabled={web3Loading || !ready}>
+                    <Wallet size={18} /> {!ready ? 'Initializing...' : 'Connect Web3 Wallet'}
+                  </button>
+                  <button 
+                    className="btn-connect" 
+                    onClick={connectWallet} 
+                    disabled={web3Loading || !ready}
+                    style={{ backgroundColor: '#FFFFFF', color: '#001830', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', border: 'none' }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" style={{ display: 'block' }}>
+                      <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v3.9h6.6c-.3 1.53-1.17 2.82-2.43 3.68v3.05h3.9c2.3-2.1 3.67-5.2 3.67-8.56z"/>
+                      <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.9-3.05c-1.08.72-2.45 1.16-4.03 1.16-3.1 0-5.72-2.1-6.66-4.91H1.28v3.15C3.26 21.3 7.37 24 12 24z"/>
+                      <path fill="#FBBC05" d="M5.34 14.29A7.16 7.16 0 0 1 5 12c0-.8.14-1.57.38-2.29V6.57H1.28A11.94 11.94 0 0 0 0 12c0 2.05.52 4 1.28 5.71l4.06-3.42z"/>
+                      <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.93 1.19 15.24 0 12 0 7.37 0 3.26 2.7 1.28 6.57l4.06 3.42c.94-2.8 3.56-4.9 6.66-4.9z"/>
+                    </svg>
+                    {!ready ? 'Initializing...' : 'Sign in with Google'}
+                  </button>
+                </div>
               )}
             </div>
           ) : (
@@ -1344,6 +1561,180 @@ export default function App() {
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {/* Deposit Modal */}
+      {showDepositModal && (
+        <div className="wallet-modal-overlay">
+          <div className="wallet-modal" style={{ alignItems: 'center', textAlign: 'center' }}>
+            <button className="wallet-modal-close" onClick={() => setShowDepositModal(false)}>
+              ✕
+            </button>
+            <h3 className="wallet-modal-title" style={{ width: '100%', justifyContent: 'center' }}>
+              <Coins size={20} style={{ color: 'var(--accent-color)' }} />
+              Deposit
+            </h3>
+
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', margin: '0.5rem 0 0.25rem 0', lineHeight: '1.4' }}>
+              Scan this QR code or copy the address below to transfer assets directly to your embedded on-chain wallet.
+            </p>
+
+            <div className="qr-code-placeholder" style={{ marginTop: '0.5rem' }}>
+              <img 
+                src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${account}`} 
+                alt="Wallet Address QR Code" 
+              />
+            </div>
+
+            <div style={{ backgroundColor: 'rgba(0,0,0,0.3)', border: '1px solid var(--panel-border)', borderRadius: '8px', padding: '0.8rem', width: '100%', fontFamily: 'monospace', fontSize: '0.85rem', wordBreak: 'break-all', userSelect: 'all', color: 'var(--text-primary)', boxSizing: 'border-box', marginTop: '0.2rem' }}>
+              {account}
+            </div>
+
+            <button 
+              type="button"
+              className="btn-submit" 
+              style={{ width: '100%', height: '42px', marginTop: '0.4rem' }}
+              onClick={handleCopyAddress}
+            >
+              {copied ? 'Address Copied!' : 'Copy Wallet Address'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Withdraw Modal */}
+      {showWithdrawModal && (
+        <div className="wallet-modal-overlay">
+          <div className="wallet-modal">
+            <button className="wallet-modal-close" onClick={() => setShowWithdrawModal(false)}>
+              ✕
+            </button>
+            <h3 className="wallet-modal-title">
+              <ArrowRightLeft size={20} style={{ color: 'var(--accent-color)' }} />
+              Withdraw
+            </h3>
+            {/* Asset Selector & Amount Input */}
+            <form onSubmit={handleWithdrawFunds} style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', width: '100%', marginTop: '0.5rem' }}>
+              <div style={{ border: '1.5px solid var(--panel-border)', borderRadius: '8px', padding: '0.5rem', background: 'rgba(0,0,0,0.2)', width: '100%', boxSizing: 'border-box', display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative' }}>
+                {/* Selected Asset Trigger */}
+                <div 
+                  style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', padding: '0.2rem 0.5rem', borderRadius: '4px', backgroundColor: 'rgba(255,255,255,0.05)' }}
+                  onClick={() => setShowWithdrawAssetDropdown(!showWithdrawAssetDropdown)}
+                >
+                  <div className="asset-logo" style={{ backgroundColor: getAssetColor(withdrawAsset), width: '20px', height: '20px', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.6rem', fontWeight: 700, color: '#FFFFFF' }}>
+                    {withdrawAsset}
+                  </div>
+                  <span style={{ fontSize: '0.9rem', fontWeight: 700 }}>{withdrawAsset}</span>
+                  <ChevronRight size={14} style={{ transform: 'rotate(90deg)', color: 'var(--text-secondary)' }} />
+                </div>
+
+                {/* Amount Input */}
+                <input 
+                  type="number" 
+                  step="any"
+                  placeholder="0.00"
+                  value={withdrawAmount}
+                  onChange={(e) => setWithdrawAmount(e.target.value)}
+                  style={{ background: 'none', border: 'none', color: '#FFFFFF', fontSize: '1.2rem', fontWeight: 600, textAlign: 'right', width: '150px', outline: 'none' }}
+                  required
+                />
+
+                {/* Withdraw Asset Dropdown menu popup */}
+                {showWithdrawAssetDropdown && (
+                  <div className="wallet-dropdown-menu" style={{ width: '200px', maxHeight: '200px', overflowY: 'auto', top: '100%', left: '0.5rem', boxSizing: 'border-box' }}>
+                    {ALL_ASSETS.map((asset) => (
+                      <button 
+                        key={asset.symbol}
+                        type="button"
+                        className="wallet-dropdown-item" 
+                        style={{ justifyContent: 'space-between' }}
+                        onClick={() => {
+                          setWithdrawAsset(asset.symbol);
+                          setShowWithdrawAssetDropdown(false);
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <div className="asset-logo" style={{ backgroundColor: getAssetColor(asset.symbol), width: '22px', height: '22px', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.65rem', fontWeight: 700, color: '#FFFFFF' }}>
+                            {asset.symbol}
+                          </div>
+                          <span>{asset.symbol}</span>
+                        </div>
+                        <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{getAssetBalance(asset.symbol)}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Chain details & Max balance info */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', width: '100%', paddingLeft: '0.2rem', boxSizing: 'border-box' }}>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'flex', gap: '4px', alignItems: 'center' }}>
+                  Chain <span className="network-dot" style={{ backgroundColor: 'var(--accent-color)', width: '6px', height: '6px', borderRadius: '50%' }}></span> <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Robinhood L2 Testnet</span>
+                </div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                  Max amount: <span className="input-max-btn" onClick={() => setWithdrawAmount(getAssetBalance(withdrawAsset))}>{getAssetBalance(withdrawAsset)} {withdrawAsset}</span>
+                </div>
+              </div>
+
+              {/* Percentage Selection */}
+              <div style={{ display: 'flex', gap: '0.5rem', width: '100%', marginTop: '0.2rem' }}>
+                {[25, 50, 75, 100].map((pct) => (
+                  <button 
+                    key={pct}
+                    type="button" 
+                    className="wallet-dropdown-item" 
+                    style={{ flex: 1, height: '34px', justifyContent: 'center', border: '1px solid var(--panel-border)', background: 'rgba(255,255,255,0.02)', fontWeight: 600, fontSize: '0.8rem' }}
+                    onClick={() => {
+                      const bal = parseFloat(getAssetBalance(withdrawAsset));
+                      if (!isNaN(bal) && bal > 0) {
+                        setWithdrawAmount(((bal * pct) / 100).toFixed(withdrawAsset === 'ETH' ? 4 : 2));
+                      }
+                    }}
+                  >
+                    {pct}%
+                  </button>
+                ))}
+              </div>
+
+              {/* Destination Address Input */}
+              <div style={{ marginTop: '0.4rem', width: '100%', boxSizing: 'border-box' }}>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.3rem' }}>
+                  The withdrawal will be sent to:
+                </div>
+                <input 
+                  type="text" 
+                  placeholder="Enter destination address 0x..." 
+                  className="input-field" 
+                  style={{ width: '100%', boxSizing: 'border-box' }}
+                  value={withdrawRecipient}
+                  onChange={(e) => setWithdrawRecipient(e.target.value)}
+                  required
+                />
+              </div>
+
+              {/* Collapsible / Summary block */}
+              <div style={{ border: '1px solid var(--panel-border)', borderRadius: '8px', padding: '0.8rem', width: '100%', background: 'rgba(0,0,0,0.15)', marginTop: '0.4rem', boxSizing: 'border-box' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                  <span>Estimated gas fee:</span>
+                  <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>0.0001 ETH</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.3rem' }}>
+                  <span>Transaction speed:</span>
+                  <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Instant (&lt; 2s)</span>
+                </div>
+              </div>
+
+              <button 
+                type="submit" 
+                className="btn-submit" 
+                style={{ width: '100%', height: '42px', marginTop: '0.5rem' }}
+                disabled={withdrawLoading || !withdrawRecipient || !withdrawAmount || parseFloat(withdrawAmount) <= 0}
+              >
+                {withdrawLoading ? 'Processing Withdrawal...' : !withdrawAmount || parseFloat(withdrawAmount) <= 0 ? 'Enter Amount' : `Withdraw ${withdrawAmount} ${withdrawAsset}`}
+              </button>
+            </form>
+          </div>
         </div>
       )}
     </div>
