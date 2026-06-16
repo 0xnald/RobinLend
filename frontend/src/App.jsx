@@ -208,14 +208,27 @@ export default function App() {
 
   // --- Network Switcher ---
   const switchNetwork = async () => {
-    if (!window.ethereum) return;
+    if (!window.ethereum) {
+      alert("No Ethereum wallet (like MetaMask) detected. Please install a wallet to continue.");
+      return;
+    }
     try {
       await window.ethereum.request({
         method: 'wallet_switchEthereumChain',
         params: [{ chainId: '0xb626' }] // 46630 in hex
       });
     } catch (switchError) {
-      if (switchError.code === 4902) {
+      console.error("Switch network error:", switchError);
+      
+      // Check if chain is unrecognized (code 4902, or message/data indicates it's missing)
+      const isChainMissing = 
+        switchError.code === 4902 || 
+        (switchError.message && switchError.message.toLowerCase().includes("unrecognized")) ||
+        (switchError.data && typeof switchError.data === 'object' && 
+          (switchError.data.code === 4902 || 
+           (switchError.data.originalError && switchError.data.originalError.code === 4902)));
+
+      if (isChainMissing) {
         try {
           await window.ethereum.request({
             method: 'wallet_addEthereumChain',
@@ -229,7 +242,10 @@ export default function App() {
           });
         } catch (addError) {
           console.error("Failed to add network:", addError);
+          alert(`Failed to add Robinhood Chain Testnet: ${addError.message || addError}`);
         }
+      } else {
+        alert(`Failed to switch to Robinhood Chain Testnet: ${switchError.message || switchError}`);
       }
     }
   };
